@@ -20,7 +20,7 @@ BASE_URL = 'https://app.opencve.io'
 LOOKBACK_DAYS = 7
 
 # Input and output files are hardcoded for simplicity.
-ASSETS_FILE_PATH = 'assets_test.xlsx'
+ASSETS_FILE_PATH = os.getenv('ASSET_PATH')
 OUTPUT_CSV_FILE = 'cves_last_week.csv'
 
 # CSV columns we preserve.
