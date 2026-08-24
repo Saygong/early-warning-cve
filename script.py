@@ -5,22 +5,26 @@
 
 import csv
 import re
+import os
+import time
+import requests
 from datetime import datetime, timedelta
 from pathlib import Path
 from urllib.parse import quote_plus
-
-import requests
-from bs4 import BeautifulSoup
 from openpyxl import load_workbook
+from dotenv import load_dotenv
+
+load_dotenv()
 
 # The site we query.
-BASE_URL = 'https://app.opencve.io'
+BASE_URL = 'https://app.opencve.io/api/v2'
+
 
 # Only rows updated in the last X days are kept.
-LOOKBACK_DAYS = 7
+LOOKBACK_DAYS = 100
 
 # Input and output files are hardcoded for simplicity.
-ASSETS_FILE_PATH = os.getenv('ASSET_PATH')
+ASSETS_FILE_PATH = 'assets_test.xlsx'
 OUTPUT_CSV_FILE = 'cves_last_week.csv'
 
 # CSV columns we preserve.
@@ -36,19 +40,56 @@ CSV_HEADERS = [
     'Description',
 ]
 
-# Use a single session for all requests.
+# Use a single session for all requests. Session granted by an API token set via environment variable.
 session = requests.Session()
 session.headers.update({
-    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
-    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+    'User-Agent': 'Mozilla/5.0 (compatible; early-warning-cve/1.0)',
+    'Accept': 'application/json, text/plain, */*',
 })
 
+# Authorization: only set if token present
+_token = os.getenv('OPENCVE_API_TOKEN')
+time.sleep(2)
+if not _token:
+    raise SystemExit('OPENCVE_API_TOKEN environment variable is required')
+session.headers.update({'Authorization': f'Bearer {_token}'})
 
-def fetch_html(url):
-    """Fetch HTML from the given URL using requests."""
-    response = session.get(url, timeout=30)
-    response.raise_for_status()
-    return response.text
+# SSL verification behaviour: allow custom CA bundle or disable verification for
+# environments with MITM/self-signed certificates. Prefer setting OPENCVE_CACERT
+# to a CA bundle path; set OPENCVE_VERIFY to 'false' to disable verification.
+_cacert = os.getenv('OPENCVE_CACERT')
+_verify_env = os.getenv('OPENCVE_VERIFY')
+# Default to disabling verification per user request; allow enabling via OPENCVE_VERIFY
+if _cacert:
+    session.verify = _cacert
+else:
+    if _verify_env is None:
+        session.verify = False
+        try:
+            import urllib3
+            urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+        except Exception:
+            pass
+    elif _verify_env.lower() in ('0', 'false', 'no'):
+        session.verify = False
+        try:
+            import urllib3
+            urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+        except Exception:
+            pass
+    else:
+        session.verify = True
+
+
+
+def api_get(url, params=None):
+    """GET helper for the OpenCVE API; returns parsed JSON."""
+    resp = session.get(url, params=params, timeout=30)
+    resp.raise_for_status()
+    try:
+        return resp.json()
+    except ValueError:
+        raise ValueError('Invalid JSON response from OpenCVE API')
 
 
 def slugify(text):
@@ -128,56 +169,84 @@ def parse_date(text):
         return None
 
 
-def parse_cve_rows(html):
-    """Extract CVE rows from the OpenCVE HTML table."""
-    soup = BeautifulSoup(html, 'html.parser')
-    table = soup.find('table')
-    if table is None:
-        raise ValueError('No CVE table found on OpenCVE page')
+def fetch_cves_from_api(vendor_slug, product_slug):
+    """Fetch CVEs for a vendor/product via OpenCVE API (handles simple pagination).
 
-    rows = []
-    current = None
+    Returns a list of JSON CVE items (structure may vary slightly across API versions),
+    so callers should access fields defensively.
+    """
+    url = f'{BASE_URL}/vendors/{quote_plus(vendor_slug)}/products/{quote_plus(product_slug)}/cves'
+    items = []
+    page = 1
+    per_page = 100
+    while True:
+        params = {'page': page, 'per_page': per_page}
+        data = api_get(url, params=params)
 
-    for tr in table.find_all('tr'):
-        # Skip header rows.
-        if tr.find('th'):
-            continue
+        # Support several common pagination/response shapes
+        page_items = []
+        if isinstance(data, dict):
+            if 'items' in data:
+                page_items = data['items']
+                has_next = bool(data.get('next'))
+            elif 'data' in data:
+                page_items = data['data']
+                has_next = bool(data.get('next'))
+            elif 'results' in data:
+                page_items = data['results']
+                has_next = bool(data.get('next')) or bool(data.get('next_page'))
+            else:
+                # Some endpoints return a paginated object with 'items' under another key
+                # or a single list under a named key. Try to heuristically pick the first list.
+                for v in data.values():
+                    if isinstance(v, list):
+                        page_items = v
+                        break
+                has_next = False
+        elif isinstance(data, list):
+            page_items = data
+            has_next = False
+        else:
+            raise ValueError('Unexpected response shape from OpenCVE API')
 
-        cells = tr.find_all('td')
-        if not cells:
-            continue
+        items.extend(page_items)
+        if not has_next or len(page_items) < per_page:
+            break
+        page += 1
 
-        # Some rows are just the description row.
-        if len(cells) == 1 and current is not None:
-            current['description'] = cells[0].get_text(' ', strip=True)
-            continue
-
-        # Only process rows with at least the expected 5 columns.
-        if len(cells) < 5:
-            continue
-
-        current = {
-            'cve_id': cells[0].get_text(strip=True),
-            'vendors': cells[1].get_text(' ', strip=True),
-            'products': cells[2].get_text(' ', strip=True),
-            'updated': cells[3].get_text(strip=True),
-            'cvss': cells[4].get_text(' ', strip=True),
-            'description': '',
-        }
-        rows.append(current)
-
-    return rows
+    return items
 
 
 def filter_recent(rows):
     """Keep only rows updated within the last LOOKBACK_DAYS."""
     cutoff = datetime.utcnow().date() - timedelta(days=LOOKBACK_DAYS)
-    return [row for row in rows if parse_date(row['updated']) and parse_date(row['updated']) >= cutoff]
+    def updated_date(r):
+        ud = r.get('updated') or r.get('modified') or r.get('last_modified')
+        if not ud:
+            return None
+        return parse_date(str(ud))
+
+    return [row for row in rows if updated_date(row) and updated_date(row) >= cutoff]
 
 def filter_critical(rows):
-    """Keep only rows with CVSS score >= 8.0."""
+    """Keep only rows with CVSS score >= 8.0. Works with numeric or nested cvss score."""
+    def score_of(r):
+        cvss = r.get('cvss') or r.get('cvss_score') or r.get('metrics')
+        # numeric
+        try:
+            if isinstance(cvss, (int, float)):
+                return float(cvss)
+            if isinstance(cvss, str):
+                return float(cvss.split()[0])
+            if isinstance(cvss, dict):
+                for k in ('score', 'base_score', 'cvss'):
+                    if k in cvss:
+                        return float(cvss[k])
+        except Exception:
+            return 0.0
+        return 0.0
 
-    return [row for row in rows if float(row['cvss'].split()[0]) >= 8.0]
+    return [row for row in rows if score_of(row) >= 8.0]
 
 
 def write_csv(filename, rows):
@@ -188,30 +257,70 @@ def write_csv(filename, rows):
         writer.writerows(rows)
 
 
+def extract_cve_fields(item):
+    """Normalize a CVE item from the API into our expected dict keys."""
+    def get_first(keys, default=''):
+        for k in keys:
+            if k in item and item[k] is not None:
+                return item[k]
+        return default
+
+    cve_id = get_first(['id', 'cve_id', 'cve', 'name'])
+    vendors = get_first(['vendors', 'vendor', 'vendors_list'])
+    products = get_first(['products', 'product', 'products_list'])
+    updated = get_first(['updated', 'modified', 'last_modified', 'updated_at'])
+    description = get_first(['summary', 'description'])
+    cvss = get_first(['cvss', 'cvss_score', 'score', 'base_score', 'metrics'])
+
+    # Normalize vendors/products to strings
+    def list_to_str(v):
+        if not v:
+            return ''
+        if isinstance(v, list):
+            return ' '.join(str(x) for x in v)
+        return str(v)
+
+    return {
+        'cve_id': str(cve_id),
+        'vendors': list_to_str(vendors),
+        'products': list_to_str(products),
+        'updated': str(updated),
+        'cvss': cvss,
+        'description': str(description),
+    }
+
+
 def get_cves_for_asset(asset):
-    """Fetch and return CVE rows for a single asset."""
+    """Fetch and return CVE rows for a single asset using the OpenCVE API."""
     vendor_name = asset['vendor_name']
     product_name = asset['product_name']
-    url = build_search_url(vendor_name, product_name)
+    vendor_slug = slugify(vendor_name)
+    product_slug = slugify(product_name)
 
-    print(f'[*] Querying OpenCVE: vendor={vendor_name}, product={product_name}')
-    html = fetch_html(url)
-    rows = parse_cve_rows(html)
+    print(f'[*] Querying OpenCVE API: vendor={vendor_name}, product={product_name}')
+    try:
+        items = fetch_cves_from_api(vendor_slug, product_slug)
+    except Exception as exc:
+        raise
+
+    # Normalize items into rows
+    rows = [extract_cve_fields(i) for i in items]
     rows = filter_recent(rows)
     rows = filter_critical(rows)
 
     output = []
+    query_url = build_search_url(vendor_name, product_name)
     for row in rows:
         output.append([
             vendor_name,
             product_name,
-            url,
-            row['cve_id'],
-            row['vendors'],
-            row['products'],
-            row['updated'],
-            row['cvss'],
-            row['description'],
+            query_url,
+            row.get('cve_id', ''),
+            row.get('vendors', ''),
+            row.get('products', ''),
+            row.get('updated', ''),
+            str(row.get('cvss', '')),
+            row.get('description', ''),
         ])
 
     print(f'[*] Found {len(output)} CVEs for {vendor_name} / {product_name}')
