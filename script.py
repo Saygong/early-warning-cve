@@ -21,11 +21,11 @@ BASE_URL = 'https://app.opencve.io/api/v2'
 
 
 # Only rows updated in the last X days are kept.
-LOOKBACK_DAYS = 100
+LOOKBACK_DAYS = int(os.getenv('LOOKBACK_DAYS', '7'))
 
 # Input and output files are hardcoded for simplicity.
-ASSETS_FILE_PATH = 'assets_test.xlsx'
-OUTPUT_CSV_FILE = 'cves_last_week.csv'
+ASSETS_FILE_PATH = os.getenv('PATH_INPUT_FILE')
+OUTPUT_CSV_FILE = os.getenv('PATH_OUTPUT_FILE')
 
 # CSV columns we preserve.
 CSV_HEADERS = [
