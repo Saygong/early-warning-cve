@@ -6,7 +6,6 @@
 import csv
 import re
 import os
-import time
 import requests
 import urllib3
 from datetime import datetime, timedelta, timezone
@@ -38,8 +37,10 @@ CSV_HEADERS = [
     'CVE ID',
     'Vendors',
     'Products',
+    'Created Date',
     'Updated Date',
     'CVSS',
+    'EPSS',
     'Description',
 ]
 
@@ -52,7 +53,6 @@ session.headers.update({
 
 # Authorization: only set if token present
 _token = os.getenv('OPENCVE_API_TOKEN')
-time.sleep(2)
 if not _token:
     raise SystemExit('OPENCVE_API_TOKEN environment variable is required')
 session.headers.update({'Authorization': f'Bearer {_token}'})
@@ -66,17 +66,9 @@ _verify_env = os.getenv('OPENCVE_VERIFY')
 if _cacert:
     session.verify = _cacert
 else:
-    if _verify_env is None:
+    if _verify_env is None or _verify_env.lower() in ('0', 'false', 'no'):
         session.verify = False
         try:
-            import urllib3
-            urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-        except Exception:
-            pass
-    elif _verify_env.lower() in ('0', 'false', 'no'):
-        session.verify = False
-        try:
-            import urllib3
             urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
         except Exception:
             pass
@@ -142,10 +134,10 @@ def read_assets_from_excel(path):
 
 
 def build_search_url(vendor_name, product_name):
-    """Build the OpenCVE search URL for a vendor/product pair."""
+    """Build the OpenCVE API URL for a vendor/product pair."""
     vendor_slug = slugify(vendor_name)
     product_slug = slugify(product_name)
-    return f'{BASE_URL}/cve/?vendor={quote_plus(vendor_slug)}&product={quote_plus(product_slug)}'
+    return f'{BASE_URL}/vendors/{quote_plus(vendor_slug)}/products/{quote_plus(product_slug)}/cves'
 
 
 def parse_date(text):
@@ -167,6 +159,44 @@ def parse_date(text):
         return datetime.fromisoformat(text).date()
     except ValueError:
         return None
+
+
+def parse_score(value):
+    """Extract a numeric score from a scalar or nested API value."""
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        match = re.search(r'\d+(?:\.\d+)?', value)
+        return float(match.group()) if match else None
+    if isinstance(value, dict):
+        for key in ('score', 'base_score', 'value'):
+            if key in value:
+                score = parse_score(value[key])
+                if score is not None:
+                    return score
+        for nested_value in value.values():
+            score = parse_score(nested_value)
+            if score is not None:
+                return score
+    return None
+
+
+def find_field(data, names):
+    """Find the first matching field recursively in an API response."""
+    if isinstance(data, dict):
+        for name in names:
+            if name in data and data[name] is not None:
+                return data[name]
+        for value in data.values():
+            found = find_field(value, names)
+            if found is not None:
+                return found
+    elif isinstance(data, list):
+        for value in data:
+            found = find_field(value, names)
+            if found is not None:
+                return found
+    return None
 
 
 def fetch_cves_from_api(vendor_slug, product_slug):
@@ -217,11 +247,17 @@ def fetch_cves_from_api(vendor_slug, product_slug):
     return items
 
 
+def fetch_cve_detail(cve_id):
+    """Fetch the full CVE record, including CVSS and EPSS scores."""
+    url = f'{BASE_URL}/cves/{quote_plus(cve_id)}'
+    return api_get(url)
+
+
 def filter_recent(rows):
     """Keep only rows updated within the last LOOKBACK_DAYS."""
-    cutoff = datetime.utcnow().date() - timedelta(days=LOOKBACK_DAYS)
+    cutoff = datetime.now(timezone.utc).date() - timedelta(days=LOOKBACK_DAYS)
     def updated_date(r):
-        ud = r.get('updated') or r.get('modified') or r.get('last_modified')
+        ud = r.get('created_at')
         if not ud:
             return None
         return parse_date(str(ud))
@@ -229,24 +265,12 @@ def filter_recent(rows):
     return [row for row in rows if updated_date(row) and updated_date(row) >= cutoff]
 
 def filter_critical(rows):
-    """Keep only rows with CVSS score >= 8.0. Works with numeric or nested cvss score."""
-    def score_of(r):
-        cvss = r.get('cvss') or r.get('cvss_score') or r.get('metrics')
-        # numeric
-        try:
-            if isinstance(cvss, (int, float)):
-                return float(cvss)
-            if isinstance(cvss, str):
-                return float(cvss.split()[0])
-            if isinstance(cvss, dict):
-                for k in ('score', 'base_score', 'cvss'):
-                    if k in cvss:
-                        return float(cvss[k])
-        except Exception:
-            return 0.0
-        return 0.0
-
-    return [row for row in rows if score_of(row) >= 8.0]
+    """Keep rows with CVSS >= 8.0 OR EPSS >= 0.1."""
+    return [
+        row for row in rows
+        if (row.get('cvss') is not None and row['cvss'] >= CVSS_THRESHOLD)
+        or (row.get('epss') is not None and row['epss'] >= EPSS_THRESHOLD)
+    ]
 
 
 def write_csv(filename, rows):
@@ -268,9 +292,11 @@ def extract_cve_fields(item):
     cve_id = get_first(['id', 'cve_id', 'cve', 'name'])
     vendors = get_first(['vendors', 'vendor', 'vendors_list'])
     products = get_first(['products', 'product', 'products_list'])
-    updated = get_first(['updated', 'modified', 'last_modified', 'updated_at'])
-    description = get_first(['summary', 'description'])
-    cvss = get_first(['cvss', 'cvss_score', 'score', 'base_score', 'metrics'])
+    created_at = get_first(['created_at', 'published_at', 'published'])
+    updated = get_first(['updated_at', 'updated', 'modified', 'last_modified'])
+    description = get_first(['description', 'summary'])
+    cvss_value = find_field(item, ('cvss_v3_1', 'cvss31', 'cvss_score', 'cvss_v3', 'v3_1', 'cvss'))
+    epss_value = find_field(item, ('epss', 'epss_score'))
 
     # Normalize vendors/products to strings
     def list_to_str(v):
@@ -284,8 +310,10 @@ def extract_cve_fields(item):
         'cve_id': str(cve_id),
         'vendors': list_to_str(vendors),
         'products': list_to_str(products),
+        'created_at': str(created_at),
         'updated': str(updated),
-        'cvss': cvss,
+        'cvss': parse_score(cvss_value),
+        'epss': parse_score(epss_value),
         'description': str(description),
     }
 
@@ -303,9 +331,14 @@ def get_cves_for_asset(asset):
     except Exception as exc:
         raise
 
-    # Normalize items into rows
-    rows = [extract_cve_fields(i) for i in items]
-    rows = filter_recent(rows)
+    # The list endpoint has publication dates; fetch details only for recent CVEs.
+    rows = filter_recent([extract_cve_fields(i) for i in items])
+    detailed_rows = []
+    for row in rows:
+        detail = fetch_cve_detail(row['cve_id'])
+        detailed_rows.append(extract_cve_fields({**row, **detail}))
+
+    rows = detailed_rows
     rows = filter_critical(rows)
 
     output = []
@@ -318,8 +351,10 @@ def get_cves_for_asset(asset):
             row.get('cve_id', ''),
             row.get('vendors', ''),
             row.get('products', ''),
+            row.get('created_at', ''),
             row.get('updated', ''),
-            str(row.get('cvss', '')),
+            '' if row.get('cvss') is None else str(row['cvss']),
+            '' if row.get('epss') is None else str(row['epss']),
             row.get('description', ''),
         ])
 
@@ -328,7 +363,7 @@ def get_cves_for_asset(asset):
 
 
 def main():
-    """Main script flow: read assets, scrape OpenCVE, and save CSV."""
+    """Main script flow: read assets, query OpenCVE, and save CSV."""
     assets_path = Path(ASSETS_FILE_PATH)
     if not assets_path.exists():
         raise SystemExit(f'Excel file not found: {assets_path}')
