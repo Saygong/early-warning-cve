@@ -116,14 +116,11 @@ def read_assets_from_excel(path):
     assets = []
     for row in worksheet.iter_rows(min_row=2):
         if all(cell.value is None for cell in row):
-            continue
+            return assets
 
         vendor_name = str(row[headers.index('vendor_name')].value).strip()
         product_name = str(row[headers.index('product_name')].value).strip()
 
-        # Skip rows that are incomplete.
-        if not vendor_name or not product_name:
-            continue
 
         assets.append({
             'vendor_name': vendor_name,
@@ -264,6 +261,7 @@ def filter_recent(rows):
 
     return [row for row in rows if updated_date(row) and updated_date(row) >= cutoff]
 
+
 def filter_critical(rows):
     """Keep rows with CVSS >= 8.0 OR EPSS >= 0.1."""
     return [
@@ -368,6 +366,7 @@ def main():
     if not assets_path.exists():
         raise SystemExit(f'Excel file not found: {assets_path}')
 
+    # Return a list of dicts with 'vendor_name' and 'product_name' keys. 
     assets = read_assets_from_excel(assets_path)
     if not assets:
         raise SystemExit('No valid vendor/product rows found in the Excel file')
