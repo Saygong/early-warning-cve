@@ -8,7 +8,8 @@ import re
 import os
 import time
 import requests
-from datetime import datetime, timedelta
+import urllib3
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from urllib.parse import quote_plus
 from openpyxl import load_workbook
@@ -22,6 +23,8 @@ BASE_URL = 'https://app.opencve.io/api/v2'
 
 # Only rows updated in the last X days are kept.
 LOOKBACK_DAYS = int(os.getenv('LOOKBACK_DAYS', '7'))
+CVSS_THRESHOLD = 8.0
+EPSS_THRESHOLD = 0.1
 
 # Input and output files are hardcoded for simplicity.
 ASSETS_FILE_PATH = os.getenv('PATH_INPUT_FILE')
@@ -123,11 +126,8 @@ def read_assets_from_excel(path):
         if all(cell.value is None for cell in row):
             continue
 
-        def value(column_name):
-            return row[headers.index(column_name)].value if column_name in headers else None
-
-        vendor_name = str(value('vendor_name') or '').strip()
-        product_name = str(value('product_name') or '').strip()
+        vendor_name = str(row[headers.index('vendor_name')].value).strip()
+        product_name = str(row[headers.index('product_name')].value).strip()
 
         # Skip rows that are incomplete.
         if not vendor_name or not product_name:
