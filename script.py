@@ -4,10 +4,12 @@
 # Reads vendor/product rows from assets_test.xlsx and writes CVE matches to cves_last_week.csv.
 
 import csv
+import json
 import re
 import os
 import requests
 import urllib3
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from urllib.parse import quote_plus
@@ -20,62 +22,46 @@ load_dotenv()
 BASE_URL = 'https://app.opencve.io/api/v2'
 
 
-# Only rows updated in the last X days are kept.
 LOOKBACK_DAYS = int(os.getenv('LOOKBACK_DAYS', '7'))
-CVSS_THRESHOLD = 8.0
-EPSS_THRESHOLD = 0.1
+CVSS_THRESHOLD = float(os.getenv('CVSS_THRESHOLD'))
+EPSS_THRESHOLD = float(os.getenv('EPSS_THRESHOLD'))
+DIRECT_LINE_BASE_URL = os.getenv('DIRECT_LINE_BASE_URL')
+DIRECT_LINE_TIMEOUT = int(os.getenv('DIRECT_LINE_TIMEOUT', '30'))
+AGENT_RESPONSE_TIMEOUT = float(os.getenv('DIRECT_LINE_RESPONSE_TIMEOUT', '90'))
+POLL_INTERVAL = 1.5
 
-# Input and output files are hardcoded for simplicity.
-ASSETS_FILE_PATH = os.getenv('PATH_INPUT_FILE')
-OUTPUT_CSV_FILE = os.getenv('PATH_OUTPUT_FILE')
+ASSETS_FILE_PATH = os.getenv('PATH_INPUT_FILE', 'assets_test.xlsx')
+OUTPUT_CSV_FILE = os.getenv('PATH_OUTPUT_FILE', 'cves_last_week.csv')
 
 # CSV columns we preserve.
 CSV_HEADERS = [
     'Vendor Name',
     'Product Name',
-    'Query URL',
     'CVE ID',
-    'Vendors',
-    'Products',
     'Created Date',
-    'Updated Date',
     'CVSS',
     'EPSS',
     'Description',
+    'Business Impact Analysis',
 ]
 
-# Use a single session for all requests. Session granted by an API token set via environment variable.
+# Use a single session for OpenCVE requests.
 session = requests.Session()
 session.headers.update({
     'User-Agent': 'Mozilla/5.0 (compatible; early-warning-cve/1.0)',
     'Accept': 'application/json, text/plain, */*',
 })
 
-# Authorization: only set if token present
 _token = os.getenv('OPENCVE_API_TOKEN')
 if not _token:
     raise SystemExit('OPENCVE_API_TOKEN environment variable is required')
 session.headers.update({'Authorization': f'Bearer {_token}'})
 
-# SSL verification behaviour: allow custom CA bundle or disable verification for
-# environments with MITM/self-signed certificates. Prefer setting OPENCVE_CACERT
-# to a CA bundle path; set OPENCVE_VERIFY to 'false' to disable verification.
-_cacert = os.getenv('OPENCVE_CACERT')
 _verify_env = os.getenv('OPENCVE_VERIFY')
-# Default to disabling verification per user request; allow enabling via OPENCVE_VERIFY
-if _cacert:
-    session.verify = _cacert
-else:
-    if _verify_env is None or _verify_env.lower() in ('0', 'false', 'no'):
-        session.verify = False
-        try:
-            urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-        except Exception:
-            pass
-    else:
-        session.verify = True
-
-
+VERIFY_SSL = not (_verify_env is None or _verify_env.lower() in ('0', 'false', 'no'))
+session.verify = VERIFY_SSL
+if not VERIFY_SSL:
+    urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 def api_get(url, params=None):
     """GET helper for the OpenCVE API; returns parsed JSON."""
@@ -128,13 +114,6 @@ def read_assets_from_excel(path):
         })
 
     return assets
-
-
-def build_search_url(vendor_name, product_name):
-    """Build the OpenCVE API URL for a vendor/product pair."""
-    vendor_slug = slugify(vendor_name)
-    product_slug = slugify(product_name)
-    return f'{BASE_URL}/vendors/{quote_plus(vendor_slug)}/products/{quote_plus(product_slug)}/cves'
 
 
 def parse_date(text):
@@ -279,6 +258,92 @@ def write_csv(filename, rows):
         writer.writerows(rows)
 
 
+def directline_request(method, url, token, **kwargs):
+    """Execute a Direct Line request and return its JSON response."""
+    headers = kwargs.pop('headers', {})
+    headers['Authorization'] = f'Bearer {token}'
+    response = requests.request(
+        method,
+        url,
+        verify=VERIFY_SSL,
+        headers=headers,
+        timeout=DIRECT_LINE_TIMEOUT,
+        **kwargs,
+    )
+    response.raise_for_status()
+    return response.json() if response.content else {}
+
+
+def analyse_with_copilot(vulnerability):
+    """Send one vulnerability to Copilot Studio and return its text response."""
+    secret = os.getenv('COPILOT_AGENT_SECRET').strip()
+    if not secret:
+        raise RuntimeError('COPILOT_AGENT_SECRET environment variable is required')
+
+    token_data = directline_request(
+        'POST',
+        f'{DIRECT_LINE_BASE_URL}/tokens/generate',
+        secret,
+        headers={'Content-Type': 'application/json'},
+    )
+    token = token_data.get('token')
+    if not token:
+        raise RuntimeError('Direct Line token missing from response')
+
+    conversation_data = directline_request(
+        'POST',
+        f'{DIRECT_LINE_BASE_URL}/conversations',
+        token,
+    )
+    conversation_id = conversation_data.get('conversationId')
+    if not conversation_id:
+        raise RuntimeError('Direct Line conversationId missing from response')
+
+    prompt = (
+        'Analizza la seguente vulnerabilita e produci un testo in linguaggio business '
+        'di massimo 100 parole in cui descrivi i potenziali impatti, se esiste un '
+        'exploit pubblico e cosa succede se non viene patchata. Se un dato manca nel '
+        'JSON, dichiaralo chiaramente.\n\nJSON:\n'
+        + json.dumps(vulnerability, ensure_ascii=False, separators=(',', ':'))
+    )
+    activity_data = directline_request(
+        'POST',
+        f'{DIRECT_LINE_BASE_URL}/conversations/{conversation_id}/activities',
+        token,
+        headers={'Content-Type': 'application/json'},
+        json={
+            'type': 'message',
+            'locale': 'it-IT',
+            'from': {'id': 'script', 'role': 'user'},
+            'text': prompt,
+        },
+    )
+    sent_activity_id = activity_data.get('id')
+    if not sent_activity_id:
+        raise RuntimeError('Direct Line activity id missing from response')
+
+    deadline = time.monotonic() + AGENT_RESPONSE_TIMEOUT
+    watermark = None
+    while time.monotonic() < deadline:
+        params = {'watermark': watermark} if watermark else None
+        activities_data = directline_request(
+            'GET',
+            f'{DIRECT_LINE_BASE_URL}/conversations/{conversation_id}/activities',
+            token,
+            params=params,
+        )
+        watermark = activities_data.get('watermark')
+        for activity in activities_data.get('activities', []):
+            if activity.get('id') == sent_activity_id:
+                continue
+            sender = activity.get('from') or {}
+            if activity.get('type') == 'message' and activity.get('text') and sender.get('id') != 'script':
+                return activity['text'].strip()
+        time.sleep(POLL_INTERVAL)
+
+    raise TimeoutError(f'No Copilot response within {AGENT_RESPONSE_TIMEOUT} seconds')
+
+
 def extract_cve_fields(item):
     """Normalize a CVE item from the API into our expected dict keys."""
     def get_first(keys, default=''):
@@ -288,10 +353,7 @@ def extract_cve_fields(item):
         return default
 
     cve_id = get_first(['id', 'cve_id', 'cve', 'name'])
-    vendors = get_first(['vendors', 'vendor', 'vendors_list'])
-    products = get_first(['products', 'product', 'products_list'])
     created_at = get_first(['created_at', 'published_at', 'published'])
-    updated = get_first(['updated_at', 'updated', 'modified', 'last_modified'])
     description = get_first(['description', 'summary'])
     cvss_value = find_field(item, ('cvss_v3_1', 'cvss31', 'cvss_score', 'cvss_v3', 'v3_1', 'cvss'))
     epss_value = find_field(item, ('epss', 'epss_score'))
@@ -306,10 +368,7 @@ def extract_cve_fields(item):
 
     return {
         'cve_id': str(cve_id),
-        'vendors': list_to_str(vendors),
-        'products': list_to_str(products),
         'created_at': str(created_at),
-        'updated': str(updated),
         'cvss': parse_score(cvss_value),
         'epss': parse_score(epss_value),
         'description': str(description),
@@ -324,36 +383,42 @@ def get_cves_for_asset(asset):
     product_slug = slugify(product_name)
 
     print(f'[*] Querying OpenCVE API: vendor={vendor_name}, product={product_name}')
-    try:
-        items = fetch_cves_from_api(vendor_slug, product_slug)
-    except Exception as exc:
-        raise
+    items = fetch_cves_from_api(vendor_slug, product_slug)
 
     # The list endpoint has publication dates; fetch details only for recent CVEs.
-    rows = filter_recent([extract_cve_fields(i) for i in items])
+    rows_with_json = []
+    for item in items:
+        row = extract_cve_fields(item)
+        row['_raw_json'] = item
+        rows_with_json.append(row)
+
+    rows = filter_recent(rows_with_json)
     detailed_rows = []
     for row in rows:
         detail = fetch_cve_detail(row['cve_id'])
-        detailed_rows.append(extract_cve_fields({**row, **detail}))
+        vulnerability_json = {**row['_raw_json'], **detail}
+        detailed_row = extract_cve_fields(vulnerability_json)
+        detailed_row['_raw_json'] = vulnerability_json
+        detailed_rows.append(detailed_row)
 
-    rows = detailed_rows
-    rows = filter_critical(rows)
+    #rows = filter_critical(detailed_rows)
+
+    directline_secret = os.getenv('COPILOT_AGENT_SECRET').strip()
+    if not directline_secret:
+        raise SystemExit('COPILOT_AGENT_SECRET environment variable is required')
 
     output = []
-    query_url = build_search_url(vendor_name, product_name)
     for row in rows:
+        business_analysis = analyse_with_copilot(row['_raw_json'])
         output.append([
             vendor_name,
             product_name,
-            query_url,
             row.get('cve_id', ''),
-            row.get('vendors', ''),
-            row.get('products', ''),
             row.get('created_at', ''),
-            row.get('updated', ''),
             '' if row.get('cvss') is None else str(row['cvss']),
             '' if row.get('epss') is None else str(row['epss']),
             row.get('description', ''),
+            business_analysis,
         ])
 
     print(f'[*] Found {len(output)} CVEs for {vendor_name} / {product_name}')
