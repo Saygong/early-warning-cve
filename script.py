@@ -41,9 +41,16 @@ CSV_HEADERS = [
     'Created Date',
     'CVSS',
     'EPSS',
-    'Description',
-    'Business Impact Analysis',
+    'Description',   
 ]
+
+ai_integration = os.getenv('USE_COPILOT').strip()
+if ai_integration.lower() in ('1', 'true', 'yes'):
+    CSV_HEADERS.extend([
+        'Business Impact Analysis',
+        'Remediation Suggestions',
+    ])
+
 
 # Use a single session for OpenCVE requests.
 session = requests.Session()
@@ -274,8 +281,8 @@ def directline_request(method, url, token, **kwargs):
     return response.json() if response.content else {}
 
 
-def analyse_with_copilot(vulnerability):
-    """Send one vulnerability to Copilot Studio and return its text response."""
+def business_impact_analysis_copilot(vulnerability):
+    """Send one vulnerability to Copilot Studio and return its business impact analysis."""
     secret = os.getenv('COPILOT_AGENT_SECRET').strip()
     if not secret:
         raise RuntimeError('COPILOT_AGENT_SECRET environment variable is required')
@@ -301,7 +308,7 @@ def analyse_with_copilot(vulnerability):
 
     prompt = (
         'Analizza la seguente vulnerabilita e produci un testo in linguaggio business '
-        'di massimo 100 parole in cui descrivi i potenziali impatti, se esiste un '
+        'di massimo 70 parole in cui descrivi i potenziali impatti, se esiste un '
         'exploit pubblico e cosa succede se non viene patchata. Se un dato manca nel '
         'JSON, dichiaralo chiaramente.\n\nJSON:\n'
         + json.dumps(vulnerability, ensure_ascii=False, separators=(',', ':'))
@@ -409,7 +416,8 @@ def get_cves_for_asset(asset):
 
     output = []
     for row in rows:
-        business_analysis = analyse_with_copilot(row['_raw_json'])
+        ai_integration = os.getenv('USE_COPILOT').strip()
+        
         output.append([
             vendor_name,
             product_name,
@@ -418,8 +426,13 @@ def get_cves_for_asset(asset):
             '' if row.get('cvss') is None else str(row['cvss']),
             '' if row.get('epss') is None else str(row['epss']),
             row.get('description', ''),
-            business_analysis,
         ])
+
+        if ai_integration.lower() in ('1', 'true', 'yes'):
+            business_analysis = business_impact_analysis_copilot(row['_raw_json'])
+            remediation_analysis = remediation_suggestions_copilot(row['_raw_json'])
+            output[-1].append(business_analysis)
+            output[-1].append(remediation_analysis)
 
     print(f'[*] Found {len(output)} CVEs for {vendor_name} / {product_name}')
     return output
