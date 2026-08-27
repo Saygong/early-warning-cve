@@ -350,6 +350,72 @@ def business_impact_analysis_copilot(vulnerability):
 
     raise TimeoutError(f'No Copilot response within {AGENT_RESPONSE_TIMEOUT} seconds')
 
+def remediation_suggestions_copilot(vulnerability):
+    """Send one vulnerability to Copilot Studio and return its remediation suggestions."""
+    secret = os.getenv('COPILOT_AGENT_SECRET').strip()
+    if not secret:
+        raise RuntimeError('COPILOT_AGENT_SECRET environment variable is required')
+
+    token_data = directline_request(
+        'POST',
+        f'{DIRECT_LINE_BASE_URL}/tokens/generate',
+        secret,
+        headers={'Content-Type': 'application/json'},
+    )
+    token = token_data.get('token')
+    if not token:
+        raise RuntimeError('Direct Line token missing from response')
+
+    conversation_data = directline_request(
+        'POST',
+        f'{DIRECT_LINE_BASE_URL}/conversations',
+        token,
+    )
+    conversation_id = conversation_data.get('conversationId')
+    if not conversation_id:
+        raise RuntimeError('Direct Line conversationId missing from response')
+
+    prompt = (
+        'Analizza la seguente vulnerabilita e produci un testo in linguaggio business '
+        'di massimo 50 parole in cui descrivi e consigli le attività di remediation o, se non possibile, le misure mitigazione.\n\nJSON:\n'
+        + json.dumps(vulnerability, ensure_ascii=False, separators=(',', ':'))
+    )
+    activity_data = directline_request(
+        'POST',
+        f'{DIRECT_LINE_BASE_URL}/conversations/{conversation_id}/activities',
+        token,
+        headers={'Content-Type': 'application/json'},
+        json={
+            'type': 'message',
+            'locale': 'it-IT',
+            'from': {'id': 'script', 'role': 'user'},
+            'text': prompt,
+        },
+    )
+    sent_activity_id = activity_data.get('id')
+    if not sent_activity_id:
+        raise RuntimeError('Direct Line activity id missing from response')
+
+    deadline = time.monotonic() + AGENT_RESPONSE_TIMEOUT
+    watermark = None
+    while time.monotonic() < deadline:
+        params = {'watermark': watermark} if watermark else None
+        activities_data = directline_request(
+            'GET',
+            f'{DIRECT_LINE_BASE_URL}/conversations/{conversation_id}/activities',
+            token,
+            params=params,
+        )
+        watermark = activities_data.get('watermark')
+        for activity in activities_data.get('activities', []):
+            if activity.get('id') == sent_activity_id:
+                continue
+            sender = activity.get('from') or {}
+            if activity.get('type') == 'message' and activity.get('text') and sender.get('id') != 'script':
+                return activity['text'].strip()
+        time.sleep(POLL_INTERVAL)
+
+    raise TimeoutError(f'No Copilot response within {AGENT_RESPONSE_TIMEOUT} seconds')
 
 def extract_cve_fields(item):
     """Normalize a CVE item from the API into our expected dict keys."""
