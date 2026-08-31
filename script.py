@@ -114,7 +114,6 @@ def read_assets_from_excel(path):
         vendor_name = str(row[headers.index('vendor_name')].value).strip()
         product_name = str(row[headers.index('product_name')].value).strip()
 
-
         assets.append({
             'vendor_name': vendor_name,
             'product_name': product_name,
@@ -137,7 +136,6 @@ def parse_date(text):
             return datetime.strptime(text, fmt).date()
         except ValueError:
             continue
-
     try:
         return datetime.fromisoformat(text).date()
     except ValueError:
@@ -189,15 +187,12 @@ def fetch_cves_from_api(vendor_slug, product_slug):
                 if isinstance(v, list):
                     page_items = v
                     break
-            
     elif isinstance(data, list):
         page_items = data
-        
     else:
         raise ValueError('Unexpected response shape from OpenCVE API')
 
     items.extend(page_items)
-
 
     return items
 
@@ -403,8 +398,6 @@ def extract_cve_fields(item, score):
     
 
     if not score:
-        cvss_value = None
-        epss_value = None
 
         return {
             'cve_id': str(cve_id),
@@ -414,8 +407,7 @@ def extract_cve_fields(item, score):
             'description': str(description),
         }
     else:
-        cvss_value = find_field(item, ('cvssv3_1'))
-        epss_value = find_field(item, ('epss'))
+
         return {
             'cve_id': str(cve_id),
             'created_at': str(created_at),
