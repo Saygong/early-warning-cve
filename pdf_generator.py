@@ -16,6 +16,7 @@ from reportlab.lib.enums import TA_CENTER, TA_JUSTIFY, TA_RIGHT
 load_dotenv()
 
 LOOKBACK_DAYS = os.getenv('LOOKBACK_DAYS', 'unspecified')
+COMPANY_NAME = str(os.getenv('COMPANY_NAME', 'unspecified'))
 
 # PDF styling constants
 BRAND_COLOR = HexColor('#003D82')
@@ -49,7 +50,8 @@ def write_pdf(filename, rows):
     """
     doc = SimpleDocTemplate(filename, pagesize=A4, topMargin=0.5*inch, bottomMargin=0.5*inch)
 
-    doc.title = "Sit Group | Weekly Early Warning Report"
+    doc.title = COMPANY_NAME + " | Weekly Early Warning Report"
+
 
     story = []
     styles = getSampleStyleSheet()

@@ -466,7 +466,8 @@ def main():
         except Exception as exc:
             print(f'[!] Skipping {asset["vendor_name"]} / {asset["product_name"]}: {exc}')
 
-    write_pdf(OUTPUT_PDF_FILE, all_rows)
+    output_file_name = OUTPUT_PDF_FILE + f'_{datetime.now().strftime("%d-%m-%Y")}.pdf'
+    write_pdf(output_file_name, all_rows)
     print(f'[*] Generated report with {len(all_rows)} CVEs')
 
 

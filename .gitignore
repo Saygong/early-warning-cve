@@ -224,6 +224,7 @@ images
 
 # Output file
 cves_last_week.pdf
+output_reports
 
 # Temp stuff
 temp
