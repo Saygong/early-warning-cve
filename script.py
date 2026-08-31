@@ -188,44 +188,36 @@ def fetch_cves_from_api(vendor_slug, product_slug):
     Returns a list of JSON CVE items (structure may vary slightly across API versions),
     so callers should access fields defensively.
     """
-    url = f'{BASE_URL}/vendors/{quote_plus(vendor_slug)}/products/{quote_plus(product_slug)}/cves'
+    url = f'{BASE_URL}/vendors/{quote_plus(vendor_slug)}/products/{quote_plus(product_slug)}/cves?page_size=50'
     items = []
-    page = 1
-    per_page = 100
-    while True:
-        params = {'page': page, 'per_page': per_page}
-        data = api_get(url, params=params)
+    
+    data = api_get(url)
 
-        # Support several common pagination/response shapes
-        page_items = []
-        if isinstance(data, dict):
-            if 'items' in data:
-                page_items = data['items']
-                has_next = bool(data.get('next'))
-            elif 'data' in data:
-                page_items = data['data']
-                has_next = bool(data.get('next'))
-            elif 'results' in data:
-                page_items = data['results']
-                has_next = bool(data.get('next')) or bool(data.get('next_page'))
-            else:
-                # Some endpoints return a paginated object with 'items' under another key
-                # or a single list under a named key. Try to heuristically pick the first list.
-                for v in data.values():
-                    if isinstance(v, list):
-                        page_items = v
-                        break
-                has_next = False
-        elif isinstance(data, list):
-            page_items = data
-            has_next = False
+    # Support several common pagination/response shapes
+    page_items = []
+    if isinstance(data, dict):
+        if 'items' in data:
+            page_items = data['items']
+        elif 'data' in data:
+            page_items = data['data']
+        elif 'results' in data:
+            page_items = data['results']
         else:
-            raise ValueError('Unexpected response shape from OpenCVE API')
+            # Some endpoints return a paginated object with 'items' under another key
+            # or a single list under a named key. Try to heuristically pick the first list.
+            for v in data.values():
+                if isinstance(v, list):
+                    page_items = v
+                    break
+            
+    elif isinstance(data, list):
+        page_items = data
+        
+    else:
+        raise ValueError('Unexpected response shape from OpenCVE API')
 
-        items.extend(page_items)
-        if not has_next or len(page_items) < per_page:
-            break
-        page += 1
+    items.extend(page_items)
+
 
     return items
 
@@ -237,15 +229,15 @@ def fetch_cve_detail(cve_id):
 
 
 def filter_recent(rows):
-    """Keep only rows updated within the last LOOKBACK_DAYS."""
+    """Keep only rows created within the last LOOKBACK_DAYS."""
     cutoff = datetime.now(timezone.utc).date() - timedelta(days=LOOKBACK_DAYS)
-    def updated_date(r):
+    def created_date(r):
         ud = r.get('created_at')
         if not ud:
             return None
         return parse_date(str(ud))
 
-    return [row for row in rows if updated_date(row) and updated_date(row) >= cutoff]
+    return [row for row in rows if created_date(row) and created_date(row) >= cutoff]
 
 
 def filter_critical(rows):
@@ -377,7 +369,7 @@ def remediation_suggestions_copilot(vulnerability):
 
     prompt = (
         'Analizza la seguente vulnerabilita e produci un testo in linguaggio business '
-        'di massimo 50 parole in cui descrivi e consigli le attività di remediation o, se non possibile, le misure mitigazione.\n\nJSON:\n'
+        'di massimo 50 parole in cui descrivi e consigli le attività di remediation o, se non possibile, le misure di mitigazione.\n\nJSON:\n'
         + json.dumps(vulnerability, ensure_ascii=False, separators=(',', ':'))
     )
     activity_data = directline_request(
@@ -417,7 +409,7 @@ def remediation_suggestions_copilot(vulnerability):
 
     raise TimeoutError(f'No Copilot response within {AGENT_RESPONSE_TIMEOUT} seconds')
 
-def extract_cve_fields(item):
+def extract_cve_fields(item, score):
     """Normalize a CVE item from the API into our expected dict keys."""
     def get_first(keys, default=''):
         for k in keys:
@@ -425,27 +417,33 @@ def extract_cve_fields(item):
                 return item[k]
         return default
 
-    cve_id = get_first(['id', 'cve_id', 'cve', 'name'])
-    created_at = get_first(['created_at', 'published_at', 'published'])
-    description = get_first(['description', 'summary'])
-    cvss_value = find_field(item, ('cvss_v3_1', 'cvss31', 'cvss_score', 'cvss_v3', 'v3_1', 'cvss'))
-    epss_value = find_field(item, ('epss', 'epss_score'))
+    cve_id = get_first(['cve_id'])
+    created_at = get_first(['created_at'])
+    description = get_first(['description'])
+    
 
-    # Normalize vendors/products to strings
-    def list_to_str(v):
-        if not v:
-            return ''
-        if isinstance(v, list):
-            return ' '.join(str(x) for x in v)
-        return str(v)
+    if not score:
+        cvss_value = None
+        epss_value = None
 
-    return {
-        'cve_id': str(cve_id),
-        'created_at': str(created_at),
-        'cvss': parse_score(cvss_value),
-        'epss': parse_score(epss_value),
-        'description': str(description),
-    }
+        return {
+            'cve_id': str(cve_id),
+            'created_at': str(created_at),
+            'cvss': None,
+            'epss': None,
+            'description': str(description),
+        }
+    else:
+        cvss_value = find_field(item, ('cvssv3_1'))
+        epss_value = find_field(item, ('epss'))
+        return {
+            'cve_id': str(cve_id),
+            'created_at': str(created_at),
+            'cvss': item.get('metrics', {}).get('cvssV3_1', {}).get('data').get('score'),
+            'epss': item.get('metrics', {}).get('epss', {}).get('data').get('score'),
+            'description': str(description),
+        }
+    
 
 
 def get_cves_for_asset(asset):
@@ -461,7 +459,7 @@ def get_cves_for_asset(asset):
     # The list endpoint has publication dates; fetch details only for recent CVEs.
     rows_with_json = []
     for item in items:
-        row = extract_cve_fields(item)
+        row = extract_cve_fields(item, score=False)
         row['_raw_json'] = item
         rows_with_json.append(row)
 
@@ -470,11 +468,11 @@ def get_cves_for_asset(asset):
     for row in rows:
         detail = fetch_cve_detail(row['cve_id'])
         vulnerability_json = {**row['_raw_json'], **detail}
-        detailed_row = extract_cve_fields(vulnerability_json)
+        detailed_row = extract_cve_fields(vulnerability_json, score=True)
         detailed_row['_raw_json'] = vulnerability_json
         detailed_rows.append(detailed_row)
 
-    #rows = filter_critical(detailed_rows)
+    rows = filter_critical(detailed_rows)
 
     directline_secret = os.getenv('COPILOT_AGENT_SECRET').strip()
     if not directline_secret:
