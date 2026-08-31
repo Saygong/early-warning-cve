@@ -317,7 +317,7 @@ def remediation_suggestions_copilot(vulnerability):
         raise RuntimeError('Direct Line conversationId missing from response')
 
     prompt = (
-        'Analizza la seguente vulnerabilita e produci un testo in linguaggio business '
+        'Senza riportare la descrizione e le informazioni generali della vulnerabilità, produci un testo in linguaggio business '
         'di massimo 50 parole in cui descrivi e consigli le attività di remediation o, se non possibile, le misure di mitigazione.\n\nJSON:\n'
         + json.dumps(vulnerability, ensure_ascii=False, separators=(',', ':'))
     )
