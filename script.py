@@ -144,26 +144,6 @@ def parse_date(text):
         return None
 
 
-def parse_score(value):
-    """Extract a numeric score from a scalar or nested API value."""
-    if isinstance(value, (int, float)):
-        return float(value)
-    if isinstance(value, str):
-        match = re.search(r'\d+(?:\.\d+)?', value)
-        return float(match.group()) if match else None
-    if isinstance(value, dict):
-        for key in ('score', 'base_score', 'value'):
-            if key in value:
-                score = parse_score(value[key])
-                if score is not None:
-                    return score
-        for nested_value in value.values():
-            score = parse_score(nested_value)
-            if score is not None:
-                return score
-    return None
-
-
 def find_field(data, names):
     """Find the first matching field recursively in an API response."""
     if isinstance(data, dict):
