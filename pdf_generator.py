@@ -34,6 +34,9 @@ def write_pdf(filename, rows):
                      [vendor, product, cve_id, date, cvss, epss, description, ...]
     """
     doc = SimpleDocTemplate(filename, pagesize=A4, topMargin=0.5*inch, bottomMargin=0.5*inch)
+
+    doc.title = "Sit Group | Weekly Early Warning Report"
+
     story = []
     styles = getSampleStyleSheet()
     
