@@ -24,6 +24,20 @@ LIGHT_GRAY = HexColor('#F5F5F5')
 DARK_GRAY = HexColor('#333333')
 LOGO_PATH = os.getenv('IMAGE_PATH', '').strip()
 
+def add_watermark(canvas, doc):
+    canvas.saveState()
+    # Posizione al centro della pagina
+    canvas.translate(A4[0] / 2, A4[1] / 2)
+    # Rotazione diagonale
+    canvas.rotate(45)
+    # Trasparenza
+    canvas.setFillAlpha(0.15)
+    # Colore
+    canvas.setFillColorRGB(1, 0, 0)
+    # Testo
+    canvas.setFont("Helvetica-Bold", 80)
+    canvas.drawCentredString(0, 0, "CONFIDENTIAL")
+    canvas.restoreState()
 
 def write_pdf(filename, rows):
     """Generate a professional PDF report with CVE data.
@@ -238,5 +252,6 @@ def write_pdf(filename, rows):
     story.append(Paragraph(footer_text, normal_style))
     
     # Build PDF
-    doc.build(story)
+    doc.build(story, onFirstPage=add_watermark, onLaterPages=add_watermark)
+
     print(f'[*] PDF report generated: {filename}')
