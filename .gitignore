@@ -218,8 +218,12 @@ __marimo__/
 .streamlit/secrets.toml
 
 
-# Input file
+# Input files
 assets_test.xlsx
+images
 
 # Output file
-cves_last_week.csv
+cves_last_week.pdf
+
+# Temp stuff
+temp

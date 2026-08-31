@@ -1,9 +1,8 @@
 ﻿#!/usr/bin/env python3
 
 # SIMPLE OpenCVE scraper.
-# Reads vendor/product rows from assets_test.xlsx and writes CVE matches to cves_last_week.csv.
+# Reads vendor/product rows from assets_test.xlsx and generates a professional CVE report PDF.
 
-import csv
 import json
 import re
 import os
@@ -15,6 +14,7 @@ from pathlib import Path
 from urllib.parse import quote_plus
 from openpyxl import load_workbook
 from dotenv import load_dotenv
+from pdf_generator import write_pdf
 
 load_dotenv()
 
@@ -31,25 +31,7 @@ AGENT_RESPONSE_TIMEOUT = float(os.getenv('DIRECT_LINE_RESPONSE_TIMEOUT', '90'))
 POLL_INTERVAL = 1.5
 
 ASSETS_FILE_PATH = os.getenv('PATH_INPUT_FILE', 'assets_test.xlsx')
-OUTPUT_CSV_FILE = os.getenv('PATH_OUTPUT_FILE', 'cves_last_week.csv')
-
-# CSV columns we preserve.
-CSV_HEADERS = [
-    'Vendor Name',
-    'Product Name',
-    'CVE ID',
-    'Created Date',
-    'CVSS',
-    'EPSS',
-    'Description',   
-]
-
-ai_integration = os.getenv('USE_COPILOT').strip()
-if ai_integration.lower() in ('1', 'true', 'yes'):
-    CSV_HEADERS.extend([
-        'Business Impact Analysis',
-        'Remediation Suggestions',
-    ])
+OUTPUT_PDF_FILE = os.getenv('PATH_OUTPUT_FILE', 'cves_last_week.pdf')
 
 
 # Use a single session for OpenCVE requests.
@@ -166,7 +148,7 @@ def fetch_cves_from_api(vendor_slug, product_slug):
     Returns a list of JSON CVE items (structure may vary slightly across API versions),
     so callers should access fields defensively.
     """
-    url = f'{BASE_URL}/vendors/{quote_plus(vendor_slug)}/products/{quote_plus(product_slug)}/cves?page_size=50'
+    url = f'{BASE_URL}/vendors/{quote_plus(vendor_slug)}/products/{quote_plus(product_slug)}/cves?page_size=5'
     items = []
     
     data = api_get(url)
@@ -222,14 +204,6 @@ def filter_critical(rows):
         if (row.get('cvss') is not None and row['cvss'] >= CVSS_THRESHOLD)
         or (row.get('epss') is not None and row['epss'] >= EPSS_THRESHOLD)
     ]
-
-
-def write_csv(filename, rows):
-    """Write output rows to a CSV file."""
-    with open(filename, 'w', newline='', encoding='utf-8') as out_file:
-        writer = csv.writer(out_file)
-        writer.writerow(CSV_HEADERS)
-        writer.writerows(rows)
 
 
 def directline_request(method, url, token, **kwargs):
@@ -475,7 +449,7 @@ def get_cves_for_asset(asset):
 
 
 def main():
-    """Main script flow: read assets, query OpenCVE, and save CSV."""
+    """Main script flow: read assets, query OpenCVE, and generate PDF report."""
     assets_path = Path(ASSETS_FILE_PATH)
     if not assets_path.exists():
         raise SystemExit(f'Excel file not found: {assets_path}')
@@ -492,8 +466,8 @@ def main():
         except Exception as exc:
             print(f'[!] Skipping {asset["vendor_name"]} / {asset["product_name"]}: {exc}')
 
-    write_csv(OUTPUT_CSV_FILE, all_rows)
-    print(f'[*] Saved {len(all_rows)} rows to {OUTPUT_CSV_FILE}')
+    write_pdf(OUTPUT_PDF_FILE, all_rows)
+    print(f'[*] Generated report with {len(all_rows)} CVEs')
 
 
 if __name__ == '__main__':
