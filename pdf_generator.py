@@ -10,13 +10,16 @@ from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.units import inch
 from reportlab.lib.colors import HexColor
-from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer, Image
-from reportlab.lib.enums import TA_CENTER, TA_JUSTIFY, TA_RIGHT
+from reportlab.lib.utils import ImageReader
+from reportlab.pdfgen import canvas as pdf_canvas
+from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
+from reportlab.lib.enums import TA_JUSTIFY, TA_LEFT
 
 load_dotenv()
 
 LOOKBACK_DAYS = os.getenv('LOOKBACK_DAYS', 'unspecified')
 COMPANY_NAME = str(os.getenv('COMPANY_NAME', 'unspecified'))
+REPORT_TITLE = os.getenv('REPORT_TITLE', 'CVE Bulletin').strip()
 
 # PDF styling constants
 BRAND_COLOR = HexColor('#003D82')
@@ -25,20 +28,97 @@ LIGHT_GRAY = HexColor('#F5F5F5')
 DARK_GRAY = HexColor('#333333')
 LOGO_PATH = os.getenv('IMAGE_PATH', '').strip()
 
-def add_watermark(canvas, doc):
+def add_header(canvas, doc):
     canvas.saveState()
-    # Posizione al centro della pagina
-    canvas.translate(A4[0] / 2, A4[1] / 2)
-    # Rotazione diagonale
-    canvas.rotate(45)
-    # Trasparenza
-    canvas.setFillAlpha(0.15)
-    # Colore
-    canvas.setFillColorRGB(1, 0, 0)
-    # Testo
-    canvas.setFont("Helvetica-Bold", 80)
-    canvas.drawCentredString(0, 0, "CONFIDENTIAL")
+    page_width, page_height = A4
+    margin = doc.leftMargin if doc is not None else 0.5 * inch
+    right_margin = doc.rightMargin if doc is not None else 0.5 * inch
+    header_x = margin
+    header_y = page_height - 0.25 * inch
+    header_width = page_width - margin - right_margin
+    header_height = 0.94 * inch
+    quarter_width = header_width / 4
+    header_bottom = header_y - header_height
+
+    canvas.setStrokeColor(BRAND_COLOR)
+    canvas.setLineWidth(0.8)
+    canvas.rect(header_x, header_bottom, header_width, header_height)
+    for quarter in (1, 3):
+        canvas.line(
+            header_x + quarter * quarter_width,
+            header_bottom,
+            header_x + quarter * quarter_width,
+            header_y,
+        )
+
+    if LOGO_PATH and os.path.exists(LOGO_PATH):
+        try:
+            canvas.drawImage(
+                ImageReader(LOGO_PATH),
+                header_x + 0.12 * inch,
+                header_bottom + 0.08 * inch,
+                width=quarter_width - 0.24 * inch,
+                height=header_height - 0.16 * inch,
+                preserveAspectRatio=True,
+                anchor='c',
+                mask='auto',
+            )
+        except Exception as e:
+            print(f'[!] Could not load logo from {LOGO_PATH}: {e}')
+
+    central_x = header_x + quarter_width
+    central_center = central_x + quarter_width
+    canvas.setFillColor(BRAND_COLOR)
+    canvas.setFont('Helvetica-Bold', 20)
+    canvas.drawCentredString(central_center, header_y - 0.35 * inch, 'Early Warning System')
+    canvas.setFillColor(DARK_GRAY)
+    canvas.setFont('Helvetica', 14)
+    canvas.drawCentredString(central_center, header_y - 0.65 * inch, REPORT_TITLE)
+
+    info_x = header_x + 3 * quarter_width + 0.08 * inch
+    info_y = header_y - 0.14 * inch
+    canvas.setFillColor(DARK_GRAY)
+    canvas.setFont('Helvetica', 9)
+    for line in (
+        'Classificazione: Confidenziale',
+        f'Doc: {REPORT_TITLE}',
+        f'Data: {datetime.now().strftime("%d/%m/%Y")}',
+        f'Pagina: {canvas.getPageNumber()} di {getattr(canvas, "page_count", "?")}',
+    ):
+        canvas.drawString(info_x, info_y, line)
+        info_y -= 0.20 * inch
     canvas.restoreState()
+
+def add_vertical_label(canvas, doc):
+    canvas.saveState()
+    canvas.translate(0.50 * inch, 1.15 * inch)
+    canvas.rotate(90)
+    canvas.setFillColor(DARK_GRAY)
+    canvas.setFont('Helvetica', 7)
+    canvas.drawString(0, 0, 'Early Warning Bulletin - Confidential information')
+    canvas.restoreState()
+
+def draw_page(canvas, doc):
+    add_header(canvas, doc)
+    add_vertical_label(canvas, doc)
+
+class NumberedCanvas(pdf_canvas.Canvas):
+    def __init__(self, *args, **kwargs):
+        pdf_canvas.Canvas.__init__(self, *args, **kwargs)
+        self._saved_page_states = []
+
+    def showPage(self):
+        self._saved_page_states.append(dict(self.__dict__))
+        self._startPage()
+
+    def save(self):
+        page_count = len(self._saved_page_states)
+        for state in self._saved_page_states:
+            self.__dict__.update(state)
+            self.page_count = page_count
+            draw_page(self, None)
+            pdf_canvas.Canvas.showPage(self)
+        pdf_canvas.Canvas.save(self)
 
 def write_pdf(filename, rows):
     """Generate a professional PDF report with CVE data.
@@ -48,7 +128,7 @@ def write_pdf(filename, rows):
         rows (list): List of CVE data rows, each row is a list with:
                      [vendor, product, cve_id, date, cvss, epss, description, ...]
     """
-    doc = SimpleDocTemplate(filename, pagesize=A4, topMargin=0.5*inch, bottomMargin=0.5*inch)
+    doc = SimpleDocTemplate(filename, pagesize=A4, topMargin=1.35*inch, bottomMargin=0.5*inch)
 
     doc.title = COMPANY_NAME + " | Weekly Early Warning Report"
 
@@ -77,58 +157,27 @@ def write_pdf(filename, rows):
     )
     
     # ===== COVER PAGE =====
-    # Create a two-column layout: logo on left, title on right
-    logo_cell = None
-    if LOGO_PATH and os.path.exists(LOGO_PATH):
-        try:
-            # Load logo with specific dimensions
-            logo_cell = Image(LOGO_PATH, width=1.4*inch, height=1.4*inch)
-            print(f'[*] Logo loaded from: {LOGO_PATH}')
-        except Exception as e:
-            print(f'[!] Could not load logo from {LOGO_PATH}: {e}')
-    
-    # Right column with title and subtitle
-    title_style_right = ParagraphStyle(
-        'TitleRight',
+    title_style = ParagraphStyle(
+        'ReportTitle',
         parent=styles['Heading1'],
-        fontSize=32,
+        fontSize=26,
         textColor=BRAND_COLOR,
         spaceAfter=12,
-        alignment=TA_RIGHT,
+        alignment=TA_LEFT,
         fontName='Helvetica-Bold'
     )
-    
-    subtitle_style_right = ParagraphStyle(
-        'SubtitleRight',
+    subtitle_style = ParagraphStyle(
+        'ReportSubtitle',
         parent=styles['Heading2'],
         fontSize=14,
         textColor=DARK_GRAY,
         spaceAfter=0,
-        alignment=TA_RIGHT,
+        alignment=TA_LEFT,
         fontName='Helvetica'
     )
-    
-    title_text = Paragraph('CVE Report', title_style_right)
-    subtitle_text = Paragraph('Early Warning System', subtitle_style_right)
-    
-    # Build right column content
-    right_content = [title_text, Spacer(1, 0.1*inch), subtitle_text]
-    
-    # Create header table with logo and title - use fixed row height to prevent stretching
-    header_data = [[logo_cell or Spacer(1.4*inch, 1.4*inch), Spacer(0.2*inch, 0), right_content]]
-    header_table = Table(header_data, colWidths=[1.8*inch, 0.2*inch, 3.8*inch], rowHeights=[1.6*inch])
-    header_table.setStyle(TableStyle([
-        ('ALIGN', (0, 0), (0, 0), 'LEFT'),
-        ('ALIGN', (2, 0), (2, 0), 'RIGHT'),
-        ('VALIGN', (0, 0), (-1, -1), 'TOP'),
-        ('LEFTPADDING', (0, 0), (-1, -1), 0),
-        ('RIGHTPADDING', (0, 0), (-1, -1), 0),
-        ('TOPPADDING', (0, 0), (-1, -1), 0),
-        ('BOTTOMPADDING', (0, 0), (-1, -1), 0),
-    ]))
-    
-    story.append(header_table)
-    story.append(Spacer(1, 0.3*inch))
+    story.append(Paragraph(REPORT_TITLE, title_style))
+    story.append(Paragraph('Early Warning System', subtitle_style))
+    story.append(Spacer(1, 0.25*inch))
     
     today = datetime.now().strftime('%d %B %Y')
     story.append(Paragraph(f'Generated on {today}', normal_style))
@@ -254,6 +303,6 @@ def write_pdf(filename, rows):
     story.append(Paragraph(footer_text, normal_style))
     
     # Build PDF
-    doc.build(story, onFirstPage=add_watermark, onLaterPages=add_watermark)
+    doc.build(story, canvasmaker=NumberedCanvas)
 
     print(f'[*] PDF report generated: {filename}')
