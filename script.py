@@ -9,7 +9,10 @@ import os
 import requests
 import urllib3
 import time
+import smtplib
 from datetime import datetime, timedelta, timezone
+from email.message import EmailMessage
+from email.utils import formataddr
 from pathlib import Path
 from urllib.parse import quote_plus
 from openpyxl import load_workbook
@@ -32,6 +35,16 @@ POLL_INTERVAL = 1.5
 
 ASSETS_FILE_PATH = os.getenv('PATH_INPUT_FILE', 'assets_test.xlsx')
 OUTPUT_PDF_FILE = os.getenv('PATH_OUTPUT_FILE', 'cves_last_week.pdf')
+
+SMTP_HOST = os.getenv('SMTP_HOST')
+SMTP_PORT = int(os.getenv('SMTP_PORT'))
+#SMTP_USE_TLS = os.getenv('SMTP_USE_TLS', 'false').lower() in ('1', 'true', 'yes')
+#SMTP_USERNAME = os.getenv('SMTP_USERNAME', '')
+#SMTP_PASSWORD = os.getenv('SMTP_PASSWORD', '')
+EMAIL_SENDER = os.getenv('EMAIL_SENDER')
+EMAIL_RECIPIENT = os.getenv('EMAIL_RECIPIENT')
+EMAIL_SUBJECT = os.getenv('EMAIL_SUBJECT')
+EMAIL_DISPLAY_NAME = os.getenv('EMAIL_DISPLAY_NAME')
 
 
 # Use a single session for OpenCVE requests.
@@ -60,6 +73,46 @@ def api_get(url, params=None):
         return resp.json()
     except ValueError:
         raise ValueError('Invalid JSON response from OpenCVE API')
+
+
+def send_report_email(pdf_path, vuln_count):
+    """Send the generated PDF to the configured email recipient."""
+    if not EMAIL_RECIPIENT.strip():
+        print('[!] Email not sent: EMAIL_RECIPIENT is not configured')
+        return
+
+    email_body = f'''Good morning team,
+    Please find attached the weekly CVE report covering the latest vulnerabilities identified across the monitored products.
+
+    This report presents critical and high-severity CVEs discovered in the last {LOOKBACK_DAYS} days across monitored products. A total of {vuln_count} vulnerabilities were identified.
+
+    Please review the attached report for further details on the identified vulnerabilities.
+
+    Best regards,
+    Cybersecurity Team'''
+
+
+    message = EmailMessage()
+    message['From'] = formataddr((EMAIL_DISPLAY_NAME, EMAIL_SENDER))
+    message['To'] = EMAIL_RECIPIENT
+    message['Subject'] = EMAIL_SUBJECT
+    message.set_content(email_body)
+
+    with open(pdf_path, 'rb') as attachment:
+        message.add_attachment(
+            attachment.read(),
+            maintype='application',
+            subtype='pdf',
+            filename=Path(pdf_path).name,
+        )
+
+    with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=30) as smtp:
+        #if SMTP_USE_TLS:
+        #    smtp.starttls()
+        #if SMTP_USERNAME:
+        #    smtp.login(SMTP_USERNAME, SMTP_PASSWORD)
+        smtp.send_message(message)
+
 
 
 def slugify(text):
