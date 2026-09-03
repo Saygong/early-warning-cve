@@ -222,7 +222,7 @@ def fetch_cves_from_api(vendor_slug, product_slug):
     Returns a list of JSON CVE items (structure may vary slightly across API versions),
     so callers should access fields defensively.
     """
-    url = f'{BASE_URL}/vendors/{quote_plus(vendor_slug)}/products/{quote_plus(product_slug)}/cves?page_size=5'
+    url = f'{BASE_URL}/vendors/{quote_plus(vendor_slug)}/products/{quote_plus(product_slug)}/cves?page_size=100'
     items = []
     
     data = api_get(url)
