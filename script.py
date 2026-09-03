@@ -272,7 +272,7 @@ def filter_recent(rows):
 
 
 def filter_critical(rows):
-    """Keep rows with CVSS >= 8.0 OR EPSS >= 0.1."""
+    """Keep rows with CVSS >= CVSS_THRESHOLD OR EPSS >= EPSS_THRESHOLD."""
     return [
         row for row in rows
         if (row.get('cvss') is not None and row['cvss'] >= CVSS_THRESHOLD)
