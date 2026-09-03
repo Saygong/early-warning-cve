@@ -103,15 +103,14 @@ def send_report_email(pdf_path, vuln_count):
         print('[!] Email not sent: EMAIL_RECIPIENT is not configured')
         return
 
-    email_body = f'''Good morning team,
-    Please find attached the weekly CVE report covering the latest vulnerabilities identified across the monitored products.
+    email_body = (f'''Good morning team,\n'''
+                 f'''Please find attached the weekly CVE report covering the latest vulnerabilities identified across the monitored products.\n\n'''
+                 f'''This report presents critical and high-severity CVEs discovered in the last {LOOKBACK_DAYS} days across monitored products. A total of {vuln_count} vulnerabilities were identified.\n\n'''
 
-    This report presents critical and high-severity CVEs discovered in the last {LOOKBACK_DAYS} days across monitored products. A total of {vuln_count} vulnerabilities were identified.
+                 f'''Please review the attached report for further details on the identified vulnerabilities.\n\n'''
 
-    Please review the attached report for further details on the identified vulnerabilities.
-
-    Best regards,
-    Cybersecurity Team'''
+                 f'''Best regards,\n'''
+                 f'''Cybersecurity Team''')
 
 
     message = EmailMessage()
