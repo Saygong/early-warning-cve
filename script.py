@@ -10,6 +10,7 @@ import requests
 import urllib3
 import time
 import smtplib
+from collections import deque
 from datetime import datetime, timedelta, timezone
 from email.message import EmailMessage
 from email.utils import formataddr
@@ -32,6 +33,9 @@ DIRECT_LINE_BASE_URL = os.getenv('DIRECT_LINE_BASE_URL')
 DIRECT_LINE_TIMEOUT = int(os.getenv('DIRECT_LINE_TIMEOUT', '30'))
 AGENT_RESPONSE_TIMEOUT = float(os.getenv('DIRECT_LINE_RESPONSE_TIMEOUT', '90'))
 POLL_INTERVAL = 1.5
+OPENCVE_CALL_LIMIT = 999
+OPENCVE_CALL_WINDOW_SECONDS = 60 * 60
+MAX_AI_VULNERABILITIES = 20
 
 ASSETS_FILE_PATH = os.getenv('PATH_INPUT_FILE', 'assets_test.xlsx')
 OUTPUT_PDF_FILE = os.getenv('PATH_OUTPUT_FILE', 'cves_last_week.pdf')
@@ -59,6 +63,8 @@ if not _token:
     raise SystemExit('OPENCVE_API_TOKEN environment variable is required')
 session.headers.update({'Authorization': f'Bearer {_token}'})
 
+_opencve_call_times = deque()
+
 _verify_env = os.getenv('OPENCVE_VERIFY')
 VERIFY_SSL = not (_verify_env is None or _verify_env.lower() in ('0', 'false', 'no'))
 session.verify = VERIFY_SSL
@@ -67,6 +73,22 @@ if not VERIFY_SSL:
 
 def api_get(url, params=None):
     """GET helper for the OpenCVE API; returns parsed JSON."""
+    now = time.monotonic()
+    while _opencve_call_times and now - _opencve_call_times[0] >= OPENCVE_CALL_WINDOW_SECONDS:
+        _opencve_call_times.popleft()
+
+    if len(_opencve_call_times) >= OPENCVE_CALL_LIMIT:
+        pause_seconds = max(
+            OPENCVE_CALL_WINDOW_SECONDS,
+            OPENCVE_CALL_WINDOW_SECONDS - (now - _opencve_call_times[0]),
+        )
+        print(f'[*] OpenCVE call limit reached; pausing for {pause_seconds / 60:.1f} minutes')
+        time.sleep(max(0, pause_seconds))
+        now = time.monotonic()
+        while _opencve_call_times and now - _opencve_call_times[0] >= OPENCVE_CALL_WINDOW_SECONDS:
+            _opencve_call_times.popleft()
+
+    _opencve_call_times.append(now)
     resp = session.get(url, params=params, timeout=30)
     resp.raise_for_status()
     try:
@@ -446,7 +468,7 @@ def extract_cve_fields(item, score):
 
 
 def get_cves_for_asset(asset):
-    """Fetch and return CVE rows for a single asset using the OpenCVE API."""
+    """Fetch CVE candidates for a single asset using the OpenCVE API."""
     vendor_name = asset['vendor_name']
     product_name = asset['product_name']
     vendor_slug = slugify(vendor_name)
@@ -473,32 +495,69 @@ def get_cves_for_asset(asset):
 
     rows = filter_critical(detailed_rows)
 
-    directline_secret = os.getenv('COPILOT_AGENT_SECRET').strip()
-    if not directline_secret:
-        raise SystemExit('COPILOT_AGENT_SECRET environment variable is required')
-
     output = []
     for row in rows:
-        ai_integration = os.getenv('USE_COPILOT').strip()
-        
-        output.append([
-            vendor_name,
-            product_name,
-            row.get('cve_id', ''),
-            row.get('created_at', ''),
-            '' if row.get('cvss') is None else str(row['cvss']),
-            '' if row.get('epss') is None else str(row['epss']),
-            row.get('description', ''),
-        ])
-
-        if ai_integration.lower() in ('1', 'true', 'yes'):
-            business_analysis = business_impact_analysis_copilot(row['_raw_json'])
-            remediation_analysis = remediation_suggestions_copilot(row['_raw_json'])
-            output[-1].append(business_analysis)
-            output[-1].append(remediation_analysis)
+        output.append({
+            'vendor_name': vendor_name,
+            'product_name': product_name,
+            'cve_id': row.get('cve_id', ''),
+            'created_at': row.get('created_at', ''),
+            'cvss': row.get('cvss'),
+            'epss': row.get('epss'),
+            'description': row.get('description', ''),
+            '_raw_json': row['_raw_json'],
+        })
 
     print(f'[*] Found {len(output)} CVEs for {vendor_name} / {product_name}')
     return output
+
+
+def build_report_rows(candidates):
+    """Sort candidates and enrich at most the top 20 with Copilot."""
+    def score(value):
+        try:
+            return float(value) if value is not None else None
+        except (TypeError, ValueError):
+            return None
+
+    candidates.sort(
+        key=lambda row: (
+            score(row.get('cvss')) is not None,
+            score(row.get('cvss')) or 0,
+            score(row.get('epss')) is not None,
+            score(row.get('epss')) or 0,
+        ),
+        reverse=True,
+    )
+
+    ai_enabled = os.getenv('USE_COPILOT', '').strip().lower() in ('1', 'true', 'yes')
+    if ai_enabled and not os.getenv('COPILOT_AGENT_SECRET', '').strip():
+        raise SystemExit('COPILOT_AGENT_SECRET environment variable is required')
+
+    report_rows = []
+    for index, row in enumerate(candidates):
+        report_row = [
+            row['vendor_name'],
+            row['product_name'],
+            row['cve_id'],
+            row['created_at'],
+            '' if row['cvss'] is None else str(row['cvss']),
+            '' if row['epss'] is None else str(row['epss']),
+            row['description'],
+        ]
+
+        if ai_enabled:
+            if index < MAX_AI_VULNERABILITIES:
+                report_row.extend([
+                    business_impact_analysis_copilot(row['_raw_json']),
+                    remediation_suggestions_copilot(row['_raw_json']),
+                ])
+            else:
+                report_row.extend(['N/A', 'N/A'])
+
+        report_rows.append(report_row)
+
+    return report_rows
 
 
 def main():
@@ -512,16 +571,22 @@ def main():
     if not assets:
         raise SystemExit('No valid vendor/product rows found in the Excel file')
 
-    all_rows = []
+    candidates = []
     for asset in assets:
         try:
-            all_rows.extend(get_cves_for_asset(asset))
+            candidates.extend(get_cves_for_asset(asset))
         except Exception as exc:
             print(f'[!] Skipping {asset["vendor_name"]} / {asset["product_name"]}: {exc}')
 
+    all_rows = build_report_rows(candidates)
     output_file_name = OUTPUT_PDF_FILE + f'_{datetime.now().strftime("%d-%m-%Y")}.pdf'
     write_pdf(output_file_name, all_rows)
     print(f'[*] Generated report with {len(all_rows)} CVEs')
+    if all_rows:
+        send_report_email(output_file_name, len(all_rows))
+        print(f'[*] Report emailed to selected recipients')
+    else:
+        print('[*] Report email skipped: no vulnerabilities found')
 
 
 if __name__ == '__main__':
