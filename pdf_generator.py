@@ -80,10 +80,10 @@ def add_header(canvas, doc):
     canvas.setFillColor(DARK_GRAY)
     canvas.setFont('Helvetica', 9)
     for line in (
-        'Classificazione: Confidenziale',
+        'Classification: Confidential',
         f'Doc: {REPORT_TITLE}',
-        f'Data: {datetime.now().strftime("%d/%m/%Y")}',
-        f'Pagina: {canvas.getPageNumber()} di {getattr(canvas, "page_count", "?")}',
+        f'Date: {datetime.now().strftime("%d/%m/%Y")}',
+        f'Page: {canvas.getPageNumber()} of {getattr(canvas, "page_count", "?")}',
     ):
         canvas.drawString(info_x, info_y, line)
         info_y -= 0.20 * inch
