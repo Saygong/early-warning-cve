@@ -33,8 +33,8 @@ DIRECT_LINE_BASE_URL = os.getenv('DIRECT_LINE_BASE_URL')
 DIRECT_LINE_TIMEOUT = int(os.getenv('DIRECT_LINE_TIMEOUT', '30'))
 AGENT_RESPONSE_TIMEOUT = float(os.getenv('DIRECT_LINE_RESPONSE_TIMEOUT', '90'))
 POLL_INTERVAL = 1.5
-OPENCVE_CALL_LIMIT = 999
-OPENCVE_CALL_WINDOW_SECONDS = 60 * 60
+OPENCVE_CALL_LIMIT = 99
+OPENCVE_WAIT_SECONDS = 60 * 60
 MAX_AI_VULNERABILITIES = 20
 
 ASSETS_FILE_PATH = os.getenv('PATH_INPUT_FILE', 'assets_test.xlsx')
@@ -63,7 +63,7 @@ if not _token:
     raise SystemExit('OPENCVE_API_TOKEN environment variable is required')
 session.headers.update({'Authorization': f'Bearer {_token}'})
 
-_opencve_call_times = deque()
+_opencve_call_count = 0
 
 _verify_env = os.getenv('OPENCVE_VERIFY')
 VERIFY_SSL = not (_verify_env is None or _verify_env.lower() in ('0', 'false', 'no'))
@@ -73,22 +73,14 @@ if not VERIFY_SSL:
 
 def api_get(url, params=None):
     """GET helper for the OpenCVE API; returns parsed JSON."""
-    now = time.monotonic()
-    while _opencve_call_times and now - _opencve_call_times[0] >= OPENCVE_CALL_WINDOW_SECONDS:
-        _opencve_call_times.popleft()
+    global _opencve_call_count
 
-    if len(_opencve_call_times) >= OPENCVE_CALL_LIMIT:
-        pause_seconds = max(
-            OPENCVE_CALL_WINDOW_SECONDS,
-            OPENCVE_CALL_WINDOW_SECONDS - (now - _opencve_call_times[0]),
-        )
-        print(f'[*] OpenCVE call limit reached; pausing for {pause_seconds / 60:.1f} minutes')
-        time.sleep(max(0, pause_seconds))
-        now = time.monotonic()
-        while _opencve_call_times and now - _opencve_call_times[0] >= OPENCVE_CALL_WINDOW_SECONDS:
-            _opencve_call_times.popleft()
+    if _opencve_call_count >= OPENCVE_CALL_LIMIT:
+        print('[*] OpenCVE call limit reached; pausing for 60 minutes')
+        time.sleep(OPENCVE_WAIT_SECONDS)
+        _opencve_call_count = 0
 
-    _opencve_call_times.append(now)
+    _opencve_call_count += 1
     resp = session.get(url, params=params, timeout=30)
     resp.raise_for_status()
     try:
@@ -222,7 +214,7 @@ def fetch_cves_from_api(vendor_slug, product_slug):
     Returns a list of JSON CVE items (structure may vary slightly across API versions),
     so callers should access fields defensively.
     """
-    url = f'{BASE_URL}/vendors/{quote_plus(vendor_slug)}/products/{quote_plus(product_slug)}/cves?page_size=100'
+    url = f'{BASE_URL}/vendors/{quote_plus(vendor_slug)}/products/{quote_plus(product_slug)}/cves?page_size=50'
     items = []
     
     data = api_get(url)
