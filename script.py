@@ -10,7 +10,6 @@ import requests
 import urllib3
 import time
 import smtplib
-from collections import deque
 from datetime import datetime, timedelta, timezone
 from email.message import EmailMessage
 from email.utils import formataddr
@@ -264,11 +263,11 @@ def filter_recent(rows):
 
 
 def filter_critical(rows):
-    """Keep rows with CVSS >= CVSS_THRESHOLD OR EPSS >= EPSS_THRESHOLD."""
+    """Keep rows with CVSS >= CVSS_THRESHOLD AND EPSS >= EPSS_THRESHOLD."""
     return [
         row for row in rows
-        if (row.get('cvss') is not None and row['cvss'] >= CVSS_THRESHOLD)
-        or (row.get('epss') is not None and row['epss'] >= EPSS_THRESHOLD)
+        if (row.get('cvss') is not None and row['cvss'] >= float(CVSS_THRESHOLD))
+        and (row.get('epss') is not None and row['epss'] >= float(EPSS_THRESHOLD))
     ]
 
 
