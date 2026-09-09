@@ -25,7 +25,7 @@ load_dotenv()
 BASE_URL = 'https://app.opencve.io/api/v2'
 
 
-LOOKBACK_DAYS = int(os.getenv('LOOKBACK_DAYS', '7'))
+LOOKBACK_DAYS = int(os.getenv('LOOKBACK_DAYS'))
 CVSS_THRESHOLD = float(os.getenv('CVSS_THRESHOLD'))
 EPSS_THRESHOLD = float(os.getenv('EPSS_THRESHOLD'))
 DIRECT_LINE_BASE_URL = os.getenv('DIRECT_LINE_BASE_URL')
@@ -267,7 +267,7 @@ def filter_critical(rows):
     return [
         row for row in rows
         if (row.get('cvss') is not None and row['cvss'] >= float(CVSS_THRESHOLD))
-        and (row.get('epss') is not None and row['epss'] >= float(EPSS_THRESHOLD))
+        #and (row.get('epss') is not None and row['epss'] >= float(EPSS_THRESHOLD))
     ]
 
 
