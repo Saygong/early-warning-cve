@@ -4,7 +4,7 @@ Generates professional PDF reports with company logo and vulnerability data.
 """
 
 import os
-from datetime import datetime
+from datetime import datetime, timedelta
 from dotenv import load_dotenv
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
@@ -155,6 +155,14 @@ def write_pdf(filename, rows):
         alignment=TA_JUSTIFY,
         leading=12
     )
+
+    sub_normal_style = ParagraphStyle(
+        'CustomNormal',
+        parent=styles['Normal'],
+        fontSize=8,
+        alignment=TA_JUSTIFY,
+        leading=10
+    )
     
     # ===== COVER PAGE =====
     title_style = ParagraphStyle(
@@ -180,7 +188,14 @@ def write_pdf(filename, rows):
     story.append(Spacer(1, 0.25*inch))
     
     today = datetime.now().strftime('%d %B %Y')
-    story.append(Paragraph(f'Generated on {today}', normal_style))
+    sixdays_ago = (datetime.now() - timedelta(days=6)).strftime('%d %B %Y')
+    story.append(
+        Paragraph(
+            f'<i>This report is based on data collected between {sixdays_ago} and {today}.</i>',
+            normal_style
+        )
+    )
+    story.append(Paragraph(f'Report generated on {today}', sub_normal_style))
     
     
     story.append(Spacer(1, 0.4*inch))
