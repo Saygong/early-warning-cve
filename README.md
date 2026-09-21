@@ -26,6 +26,13 @@ Il progetto utilizza un file `.env` per separare le impostazioni di esecuzione
 dal codice. Il file non deve essere versionato e non deve contenere valori
 sensibili nel repository.
 
+Per inviare il report a piu destinatari, valorizzare `EMAIL_RECIPIENT` nel file
+`.env` separando gli indirizzi con una virgola o un punto e virgola, ad esempio:
+
+```text
+EMAIL_RECIPIENT=security@example.com,operations@example.com
+```
+
 ## Logica di esecuzione
 
 1. Legge gli asset dal file Excel configurato.
@@ -65,3 +72,8 @@ Il report contiene:
 
 Quando non sono presenti vulnerabilita, il PDF viene comunque salvato con un
 messaggio esplicativo e non viene inviata alcuna email vuota.
+
+Ogni esecuzione salva stdout e stderr in un file nella cartella `logs`, con nome
+nel formato `YYYY-MM-DD_HH-MM-SS_logs.log`. Ogni file contiene l'orario di inizio,
+di fine e lo stato dell'esecuzione. Vengono mantenuti soltanto gli ultimi 30
+file; quelli piu vecchi vengono eliminati.
