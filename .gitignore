@@ -228,3 +228,6 @@ output_reports
 
 # Temp stuff
 temp
+
+# Log files
+logs
