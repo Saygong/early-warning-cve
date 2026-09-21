@@ -220,14 +220,13 @@ __marimo__/
 
 # Input files
 assets_test.xlsx
-images
+images/*
 
-# Output file
-cves_last_week.pdf
-output_reports
+# Output files
+output_reports/*
 
 # Temp stuff
 temp
 
 # Log files
-logs
+logs/*
