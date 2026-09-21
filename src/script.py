@@ -10,6 +10,9 @@ import requests
 import urllib3
 import time
 import smtplib
+import io
+import traceback
+from contextlib import redirect_stderr, redirect_stdout
 from datetime import datetime, timedelta, timezone
 from email.message import EmailMessage
 from email.utils import formataddr
@@ -48,6 +51,9 @@ EMAIL_SENDER = os.getenv('EMAIL_SENDER')
 EMAIL_RECIPIENT = os.getenv('EMAIL_RECIPIENT')
 EMAIL_SUBJECT = os.getenv('EMAIL_SUBJECT')
 EMAIL_DISPLAY_NAME = os.getenv('EMAIL_DISPLAY_NAME')
+
+LOG_DIRECTORY = Path(__file__).resolve().parent.parent / 'logs'
+MAX_LOG_EXECUTIONS = 30
 
 
 # Use a single session for OpenCVE requests.
@@ -89,8 +95,13 @@ def api_get(url, params=None):
 
 
 def send_report_email(pdf_path, vuln_count):
-    """Send the generated PDF to the configured email recipient."""
-    if not EMAIL_RECIPIENT.strip():
+    """Send the generated PDF to the configured email recipients."""
+    recipients = [
+        recipient.strip()
+        for recipient in re.split(r'[,;]', EMAIL_RECIPIENT or '')
+        if recipient.strip()
+    ]
+    if not recipients:
         print('[!] Email not sent: EMAIL_RECIPIENT is not configured')
         return
 
@@ -106,7 +117,7 @@ def send_report_email(pdf_path, vuln_count):
 
     message = EmailMessage()
     message['From'] = formataddr((EMAIL_DISPLAY_NAME, EMAIL_SENDER))
-    message['To'] = EMAIL_RECIPIENT
+    message['To'] = ', '.join(recipients)
     message['Subject'] = EMAIL_SUBJECT
     message.set_content(email_body)
 
@@ -124,6 +135,47 @@ def send_report_email(pdf_path, vuln_count):
         #if SMTP_USERNAME:
         #    smtp.login(SMTP_USERNAME, SMTP_PASSWORD)
         smtp.send_message(message)
+
+
+def write_execution_log(output, started_at, finished_at, exit_code):
+    """Write one execution log and retain only the latest 30 log files."""
+    execution_timestamp = started_at.strftime('%Y-%m-%d_%H-%M-%S')
+    log_file = LOG_DIRECTORY / f'{execution_timestamp}_logs.log'
+    status = 'SUCCESS' if exit_code == 0 else 'FAILED'
+    log_content = (
+        f'Execution started: {started_at.isoformat(timespec="seconds")}\n'
+        f'Execution finished: {finished_at.isoformat(timespec="seconds")}\n'
+        f'Status: {status}\n\n'
+        f'{output.rstrip()}\n'
+    )
+    log_file.write_text(log_content, encoding='utf-8')
+
+    log_files = sorted(
+        path for path in LOG_DIRECTORY.glob('*_logs.log')
+        if path.is_file()
+    )
+    for old_log in log_files[:-MAX_LOG_EXECUTIONS]:
+        old_log.unlink()
+
+
+def run_with_logging():
+    """Run the application while storing stdout/stderr for this execution."""
+    started_at = datetime.now().astimezone()
+    captured_output = io.StringIO()
+    exit_code = 0
+    with redirect_stdout(captured_output), redirect_stderr(captured_output):
+        try:
+            main()
+        except BaseException:
+            exit_code = 1
+            traceback.print_exc()
+    write_execution_log(
+        captured_output.getvalue(),
+        started_at,
+        datetime.now().astimezone(),
+        exit_code,
+    )
+    return exit_code
 
 
 
@@ -580,5 +632,5 @@ def main():
 
 
 if __name__ == '__main__':
-    main()
+    raise SystemExit(run_with_logging())
     
