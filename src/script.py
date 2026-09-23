@@ -1,5 +1,4 @@
-﻿#!/usr/bin/env python3
-
+﻿
 # SIMPLE OpenCVE scraper.
 # Reads vendor/product rows from assets_test.xlsx and generates a professional CVE report PDF.
 
