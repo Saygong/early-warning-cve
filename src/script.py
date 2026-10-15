@@ -338,9 +338,9 @@ def directline_request(method, url, token, **kwargs):
     return response.json() if response.content else {}
 
 
-def business_impact_analysis_copilot(vulnerability):
-    """Send one vulnerability to Copilot Studio and return its business impact analysis."""
-    secret = os.getenv('COPILOT_AGENT_SECRET').strip()
+def copilot_prompt_response(prompt):
+    """Send a prompt through Direct Line and return the agent's text response."""
+    secret = os.getenv('COPILOT_AGENT_SECRET', '').strip()
     if not secret:
         raise RuntimeError('COPILOT_AGENT_SECRET environment variable is required')
 
@@ -363,13 +363,6 @@ def business_impact_analysis_copilot(vulnerability):
     if not conversation_id:
         raise RuntimeError('Direct Line conversationId missing from response')
 
-    prompt = (
-        'Analizza la seguente vulnerabilita e produci un testo in linguaggio business '
-        'di massimo 70 parole in cui descrivi i potenziali impatti, se esiste un '
-        'exploit pubblico e cosa succede se non viene patchata. Se un dato manca nel '
-        'JSON, dichiaralo chiaramente.\n\nJSON:\n'
-        + json.dumps(vulnerability, ensure_ascii=False, separators=(',', ':'))
-    )
     activity_data = directline_request(
         'POST',
         f'{DIRECT_LINE_BASE_URL}/conversations/{conversation_id}/activities',
@@ -405,74 +398,136 @@ def business_impact_analysis_copilot(vulnerability):
                 return activity['text'].strip()
         time.sleep(POLL_INTERVAL)
 
-    raise TimeoutError(f'No Copilot response within {AGENT_RESPONSE_TIMEOUT} seconds')
+
+def business_impact_analysis_copilot(vulnerability):
+    """Send one CVE group to Copilot Studio and return its business impact analysis."""
+    prompt = (
+        'Analizza il seguente gruppo di vulnerabilita correlate e produci un testo in linguaggio business '
+        'di massimo 70 parole in cui descrivi i potenziali impatti, se esiste un '
+        'exploit pubblico e cosa succede se non viene patchata. Cita ogni affermazione fattuale subito dopo nel formato [URL completo]. '
+        'Usa solo fonti autorevoli effettivamente consultate o presenti nel JSON, non inventare URL; se non hai una fonte verificabile non scrivere niente. '
+        '\n\nJSON:\n'
+        + json.dumps(vulnerability, ensure_ascii=False, separators=(',', ':'))
+    )
+    return copilot_prompt_response(prompt)
 
 def remediation_suggestions_copilot(vulnerability):
-    """Send one vulnerability to Copilot Studio and return its remediation suggestions."""
-    secret = os.getenv('COPILOT_AGENT_SECRET').strip()
-    if not secret:
-        raise RuntimeError('COPILOT_AGENT_SECRET environment variable is required')
-
-    token_data = directline_request(
-        'POST',
-        f'{DIRECT_LINE_BASE_URL}/tokens/generate',
-        secret,
-        headers={'Content-Type': 'application/json'},
-    )
-    token = token_data.get('token')
-    if not token:
-        raise RuntimeError('Direct Line token missing from response')
-
-    conversation_data = directline_request(
-        'POST',
-        f'{DIRECT_LINE_BASE_URL}/conversations',
-        token,
-    )
-    conversation_id = conversation_data.get('conversationId')
-    if not conversation_id:
-        raise RuntimeError('Direct Line conversationId missing from response')
-
+    """Send one CVE group to Copilot Studio and return its remediation suggestions."""
     prompt = (
-        'Senza riportare la descrizione e le informazioni generali della vulnerabilità, produci un testo in linguaggio business '
-        'di massimo 50 parole in cui descrivi e consigli le attività di remediation o, se non possibile, le misure di mitigazione.\n\nJSON:\n'
+        'Senza riportare le descrizioni e le informazioni generali delle vulnerabilità, produci un testo in linguaggio business '
+        'di massimo 50 parole in cui descrivi e consigli le attività di remediation o, se non possibile, le misure di mitigazione. '
+        'Cita ogni affermazione fattuale subito dopo nel formato [URL completo]. Usa solo fonti autorevoli effettivamente consultate o presenti nel JSON, '
+        'non inventare URL; se non hai una fonte verificabile non scrivere niente.\n\nJSON:\n'
         + json.dumps(vulnerability, ensure_ascii=False, separators=(',', ':'))
     )
-    activity_data = directline_request(
-        'POST',
-        f'{DIRECT_LINE_BASE_URL}/conversations/{conversation_id}/activities',
-        token,
-        headers={'Content-Type': 'application/json'},
-        json={
-            'type': 'message',
-            'locale': 'it-IT',
-            'from': {'id': 'script', 'role': 'user'},
-            'text': prompt,
-        },
+    return copilot_prompt_response(prompt)
+
+
+def parse_cve_groups(response, candidates):
+    """Validate the agent's groups and map them back to the original CVE rows."""
+    if not isinstance(response, str):
+        raise ValueError('Grouping response must be text')
+
+    response = response.strip()
+    if response.startswith('```'):
+        response = re.sub(r'^```(?:json)?\s*|\s*```$', '', response, flags=re.IGNORECASE).strip()
+    result = json.loads(response)
+    groups = result.get('groups') if isinstance(result, dict) else None
+    if not isinstance(groups, list):
+        raise ValueError('Grouping response must contain a groups list')
+
+    candidates_by_id = {f'record-{index}': candidate for index, candidate in enumerate(candidates)}
+    candidate_ids_by_cve = {}
+    for record_id, candidate in candidates_by_id.items():
+        candidate_ids_by_cve.setdefault(candidate.get('cve_id', ''), []).append(record_id)
+    seen_ids = []
+    parsed_groups = []
+    for index, group in enumerate(groups, 1):
+        if not isinstance(group, dict):
+            raise ValueError('Each CVE group must be an object')
+        record_ids = group.get('record_ids')
+        if record_ids is None:
+            cve_ids = group.get('cve_ids')
+            if not isinstance(cve_ids, list) or not cve_ids or any(not isinstance(item, str) for item in cve_ids):
+                raise ValueError('Each CVE group must contain record_ids or cve_ids')
+            record_ids = []
+            for cve_id in cve_ids:
+                matching_ids = candidate_ids_by_cve.get(cve_id)
+                if not matching_ids:
+                    raise ValueError(f'Grouping response contains unknown CVE ID: {cve_id}')
+                record_ids.extend(matching_ids)
+        grouping_reason = group.get('grouping_reason')
+        if not isinstance(record_ids, list) or not record_ids or any(not isinstance(item, str) for item in record_ids):
+            raise ValueError('Each CVE group must contain a non-empty record_ids list')
+        if not isinstance(grouping_reason, str) or not grouping_reason.strip():
+            raise ValueError('Each CVE group must contain a grouping_reason')
+        if any(item not in candidates_by_id for item in record_ids):
+            raise ValueError('Grouping response contains an unknown record ID')
+        vulnerabilities = [candidates_by_id[item] for item in record_ids]
+        seen_ids.extend(record_ids)
+        cve_ids = ', '.join(candidate.get('cve_id', 'Unknown CVE') for candidate in vulnerabilities)
+        group_title = group.get('group_title')
+        if not isinstance(group_title, str) or not group_title.strip():
+            group_title = cve_ids
+        group_id = group.get('group_id')
+        if not isinstance(group_id, str) or not group_id.strip():
+            group_id = f'group-{index}'
+        parsed_groups.append({
+            'group_id': group_id,
+            'group_title': group_title.strip(),
+            'grouping_reason': grouping_reason.strip(),
+            'vulnerabilities': vulnerabilities,
+        })
+
+    expected_ids = set(candidates_by_id)
+    if len(seen_ids) != len(set(seen_ids)) or set(seen_ids) != expected_ids:
+        raise ValueError('Grouping response must include every CVE record exactly once')
+    return parsed_groups
+
+
+def group_cves_copilot(candidates):
+    """Ask Copilot to cluster eligible CVEs and return their original records."""
+    records = [
+        {
+            'record_id': f'record-{index}',
+            'cve_id': candidate.get('cve_id', ''),
+            'vendor_name': candidate.get('vendor_name', ''),
+            'product_name': candidate.get('product_name', ''),
+            'created_at': candidate.get('created_at', ''),
+            'cvss': candidate.get('cvss'),
+            'epss': candidate.get('epss'),
+            'description': candidate.get('description', ''),
+            'original_record': candidate.get('_raw_json', {}),
+        }
+        for index, candidate in enumerate(candidates)
+    ]
+    prompt = (
+        'Analyze the following list of CVEs and group together vulnerabilities that are technically similar and, more importantly, have the same potential remediation.'
+        'Do not group vulnerabilities merely because they affect the same product or share a severity score. CVSS scores, descriptions, and CVE identifiers may differ. If similarity is uncertain, keep the vulnerabilities separate.'
+        'Return only a valid JSON object containing a "groups" array. Each group must include a unique "group_id", a concise "group_title", a short "grouping_reason", and a "record_ids" array containing the record_id values belonging to that group.'
+        'Every input record_id must appear exactly once. Do not invent, modify, or omit record_ids. The report will retain the original CVE identifiers and details. Do not include any text outside the JSON object.\n\nJSON:\n'
+        + json.dumps(records, ensure_ascii=False, separators=(',', ':'))
     )
-    sent_activity_id = activity_data.get('id')
-    if not sent_activity_id:
-        raise RuntimeError('Direct Line activity id missing from response')
+    return parse_cve_groups(copilot_prompt_response(prompt), candidates)
 
-    deadline = time.monotonic() + AGENT_RESPONSE_TIMEOUT
-    watermark = None
-    while time.monotonic() < deadline:
-        params = {'watermark': watermark} if watermark else None
-        activities_data = directline_request(
-            'GET',
-            f'{DIRECT_LINE_BASE_URL}/conversations/{conversation_id}/activities',
-            token,
-            params=params,
-        )
-        watermark = activities_data.get('watermark')
-        for activity in activities_data.get('activities', []):
-            if activity.get('id') == sent_activity_id:
-                continue
-            sender = activity.get('from') or {}
-            if activity.get('type') == 'message' and activity.get('text') and sender.get('id') != 'script':
-                return activity['text'].strip()
-        time.sleep(POLL_INTERVAL)
 
-    raise TimeoutError(f'No Copilot response within {AGENT_RESPONSE_TIMEOUT} seconds')
+def group_candidates(candidates):
+    """Group candidates with Copilot, retaining all CVEs if grouping fails."""
+    if not candidates:
+        return []
+    try:
+        return group_cves_copilot(candidates)
+    except Exception as exc:
+        print(f'[!] CVE grouping failed; reporting CVEs individually: {exc}')
+        return [
+            {
+                'group_id': f'fallback-{index + 1}',
+                'group_title': candidate.get('cve_id', 'Unknown CVE'),
+                'grouping_reason': 'AI grouping unavailable; CVE retained individually.',
+                'vulnerabilities': [candidate],
+            }
+            for index, candidate in enumerate(candidates)
+        ]
 
 def extract_cve_fields(item, score):
     """Normalize a CVE item from the API into our expected dict keys."""
@@ -554,7 +609,7 @@ def get_cves_for_asset(asset):
 
 
 def build_report_rows(candidates):
-    """Sort candidates and enrich at most the top 20 with Copilot."""
+    """Sort candidates and enrich at most the top 20 CVE groups with Copilot."""
     def score(value):
         try:
             return float(value) if value is not None else None
@@ -575,26 +630,34 @@ def build_report_rows(candidates):
     if ai_enabled and not os.getenv('COPILOT_AGENT_SECRET', '').strip():
         raise SystemExit('COPILOT_AGENT_SECRET environment variable is required')
 
-    report_rows = []
-    for index, row in enumerate(candidates):
-        report_row = [
-            row['vendor_name'],
-            row['product_name'],
-            row['cve_id'],
-            row['created_at'],
-            '' if row['cvss'] is None else str(row['cvss']),
-            '' if row['epss'] is None else str(row['epss']),
-            row['description'],
+    if ai_enabled:
+        groups = group_candidates(candidates)
+    else:
+        groups = [
+            {
+                'group_id': f'individual-{index + 1}',
+                'group_title': row.get('cve_id', 'Unknown CVE'),
+                'grouping_reason': 'AI grouping disabled; CVE shown individually.',
+                'vulnerabilities': [row],
+            }
+            for index, row in enumerate(candidates)
         ]
-
+    report_rows = []
+    for index, group in enumerate(groups):
+        report_row = {
+            'group_id': group['group_id'],
+            'group_title': group['group_title'],
+            'grouping_reason': group['grouping_reason'],
+            'vulnerabilities': group['vulnerabilities'],
+        }
         if ai_enabled:
             if index < MAX_AI_VULNERABILITIES:
-                report_row.extend([
-                    business_impact_analysis_copilot(row['_raw_json']),
-                    remediation_suggestions_copilot(row['_raw_json']),
-                ])
+                group_payload = [row['_raw_json'] for row in group['vulnerabilities']]
+                report_row['business_impact'] = business_impact_analysis_copilot(group_payload)
+                report_row['remediation'] = remediation_suggestions_copilot(group_payload)
             else:
-                report_row.extend(['N/A', 'N/A'])
+                report_row['business_impact'] = 'N/A'
+                report_row['remediation'] = 'N/A'
 
         report_rows.append(report_row)
 
@@ -622,9 +685,10 @@ def main():
     all_rows = build_report_rows(candidates)
     output_file_name = OUTPUT_PDF_FILE + f'_{datetime.now().strftime("%d-%m-%Y")}.pdf'
     write_pdf(output_file_name, all_rows)
-    print(f'[*] Generated report with {len(all_rows)} CVEs')
+    cve_count = sum(len(row['vulnerabilities']) for row in all_rows)
+    print(f'[*] Generated report with {cve_count} CVEs in {len(all_rows)} groups')
     if all_rows:
-        send_report_email(output_file_name, len(all_rows))
+        send_report_email(output_file_name, cve_count)
         print(f'[*] Report emailed to selected recipients')
     else:
         print('[*] Report email skipped: no vulnerabilities found')

@@ -40,8 +40,10 @@ EMAIL_RECIPIENT=security@example.com,operations@example.com
 	CVE pubblicate nel periodo di osservazione.
 3. Mantiene le vulnerabilita che superano la soglia CVSS oppure EPSS configurata.
 4. Ordina i risultati per CVSS decrescente e, a parita, per EPSS decrescente.
-5. Se l'integrazione AI e attiva, arricchisce soltanto le prime 20 vulnerabilita
-	dell'intero report con analisi di impatto e suggerimenti di remediation.
+5. Se l'integrazione AI e attiva, raggruppa le CVE correlate e arricchisce
+	ciascuno dei primi 20 gruppi con analisi di impatto e suggerimenti di remediation.
+	Se la risposta di raggruppamento non e valida, mantiene tutte le CVE come gruppi singoli.
+	Con l'integrazione AI disattivata, ogni CVE resta una voce individuale.
 6. Applica il limite di 999 richieste OpenCVE per ora. Al raggiungimento della
 	soglia, sospende il flusso per almeno 60 minuti prima di proseguire.
 7. Se un asset genera un errore, lo registra e continua con gli asset successivi.
@@ -63,12 +65,12 @@ Lo script produce un report PDF datato nella directory e con il nome configurati
 Il report contiene:
 
 - periodo di osservazione;
-- riepilogo del numero di vulnerabilita individuate;
-- vendor, prodotto e identificativo CVE;
-- data di pubblicazione;
-- punteggi CVSS ed EPSS;
-- descrizione tecnica;
-- analisi di business e suggerimenti di remediation per le CVE arricchite con AI.
+- riepilogo del numero di CVE e dei gruppi individuati;
+- per ogni gruppo, prodotto interessato e tipologia di vulnerabilita;
+- tabella con identificativo CVE, data di pubblicazione, punteggi CVSS ed EPSS
+	e descrizione tecnica;
+- capitoli di BIA e remediation per le CVE arricchite con AI;
+- citazioni numerate nel testo e sitografia/bibliografia con link alle fonti AI.
 
 Quando non sono presenti vulnerabilita, il PDF viene comunque salvato con un
 messaggio esplicativo e non viene inviata alcuna email vuota.
