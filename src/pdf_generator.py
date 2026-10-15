@@ -4,7 +4,10 @@ Generates professional PDF reports with company logo and vulnerability data.
 """
 
 import os
+import re
+from xml.sax.saxutils import escape
 from datetime import datetime, timedelta
+from urllib.parse import urlsplit
 from dotenv import load_dotenv
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
@@ -102,6 +105,43 @@ def draw_page(canvas, doc):
     add_header(canvas, doc)
     add_vertical_label(canvas, doc)
 
+
+def escape_attribute(value):
+    """Escape text for use in an HTML-style attribute in a ReportLab paragraph."""
+    return escape(value).replace('"', '&quot;')
+
+
+def format_cited_text(text, bibliography):
+    """Replace source URLs in AI text with numbered inline citations."""
+    citation_markup = {}
+    token_index = 0
+
+    def make_citation(url, label=None):
+        nonlocal token_index
+        url = url.rstrip('.,;:!?')
+        if url not in bibliography:
+            bibliography[url] = len(bibliography) + 1
+        token = f'CITATIONTOKEN{token_index}END'
+        token_index += 1
+        number = bibliography[url]
+        link = f'<link href="{escape_attribute(url)}">[{number}]</link>'
+        citation_markup[token] = f'{escape(label)} {link}' if label else link
+        return token
+
+    text = str(text or '')
+    citation_pattern = re.compile(
+        r'\[([^\]]+)\]\((https?://[^)\s]+)\)|\[?(https?://[^\s<>\[\]()]+)\]?'
+    )
+    text = citation_pattern.sub(
+        lambda match: make_citation(match.group(2), match.group(1))
+        if match.group(2) else make_citation(match.group(3)),
+        text,
+    )
+    text = escape(text)
+    for token, markup in citation_markup.items():
+        text = text.replace(token, markup)
+    return text
+
 class NumberedCanvas(pdf_canvas.Canvas):
     def __init__(self, *args, **kwargs):
         pdf_canvas.Canvas.__init__(self, *args, **kwargs)
@@ -128,7 +168,14 @@ def write_pdf(filename, rows):
         rows (list): List of CVE data rows, each row is a list with:
                      [vendor, product, cve_id, date, cvss, epss, description, ...]
     """
-    doc = SimpleDocTemplate(filename, pagesize=A4, topMargin=1.35*inch, bottomMargin=0.5*inch)
+    doc = SimpleDocTemplate(
+        filename,
+        pagesize=A4,
+        topMargin=1.35*inch,
+        bottomMargin=0.5*inch,
+        leftMargin=0.5*inch,
+        rightMargin=0.5*inch,
+    )
 
     doc.title = COMPANY_NAME + " | Weekly Early Warning Report"
 
@@ -187,6 +234,10 @@ def write_pdf(filename, rows):
     story.append(Paragraph('Early Warning System', subtitle_style))
     story.append(Spacer(1, 0.25*inch))
     
+    cve_count = sum(
+        len(row.get('vulnerabilities', [])) if isinstance(row, dict) else 1
+        for row in rows
+    )
     today = datetime.now().strftime('%d %B %Y')
     sixdays_ago = (datetime.now() - timedelta(days=6)).strftime('%d %B %Y')
     story.append(
@@ -206,7 +257,7 @@ def write_pdf(filename, rows):
     
     summary_text = f"""
     This report presents critical and high-severity CVEs discovered in the last {LOOKBACK_DAYS} days 
-    across monitored products. A total of <b>{len(rows)} vulnerabilities</b> were identified.
+    across monitored products. A total of <b>{cve_count} CVEs</b> were identified in <b>{len(rows)} groups</b>.
     <br/><br/>
     Each entry includes:
     <br/>• <b>Vendor</b> and <b>Product</b> information
@@ -231,7 +282,7 @@ def write_pdf(filename, rows):
     story.append(Spacer(1, 0.15*inch))
 
     if rows:
-        # Create elegant subsection for each vulnerability
+        # Create an entry for each related vulnerability group.
         vuln_subsection_style = ParagraphStyle(
             'VulnSubsection',
             parent=styles['Heading3'],
@@ -252,6 +303,57 @@ def write_pdf(filename, rows):
             leading=11,
             leftIndent=0.2*inch,
         )
+
+        group_title_style = ParagraphStyle(
+            'GroupTitle',
+            parent=styles['Heading2'],
+            fontSize=15,
+            textColor=BRAND_COLOR,
+            spaceBefore=14,
+            spaceAfter=3,
+            fontName='Helvetica-Bold',
+        )
+        group_subtitle_style = ParagraphStyle(
+            'GroupSubtitle',
+            parent=styles['Heading3'],
+            fontSize=10.5,
+            textColor=DARK_GRAY,
+            spaceAfter=7,
+            fontName='Helvetica-Oblique',
+        )
+        grouping_reason_style = ParagraphStyle(
+            'GroupingReason',
+            parent=styles['Normal'],
+            fontSize=8,
+            textColor=DARK_GRAY,
+            leading=10,
+            spaceAfter=6,
+        )
+        table_header_style = ParagraphStyle(
+            'VulnerabilityTableHeader',
+            parent=styles['Normal'],
+            fontName='Helvetica-Bold',
+            fontSize=7.5,
+            textColor=HexColor('#FFFFFF'),
+            leading=9,
+        )
+        table_cell_style = ParagraphStyle(
+            'VulnerabilityTableCell',
+            parent=styles['Normal'],
+            fontSize=7.5,
+            leading=9,
+            wordWrap='CJK',
+        )
+        chapter_style = ParagraphStyle(
+            'GroupChapter',
+            parent=styles['Heading3'],
+            fontSize=10,
+            textColor=BRAND_COLOR,
+            spaceBefore=8,
+            spaceAfter=3,
+            fontName='Helvetica-Bold',
+        )
+        bibliography = {}
         
         vuln_label_style = ParagraphStyle(
             'VulnLabel',
@@ -264,32 +366,92 @@ def write_pdf(filename, rows):
         )
         
         for idx, row in enumerate(rows, 1):
-            # Subsection title with CVE ID and product info
-            cve_title = f"{row[2]} • {row[0]} {row[1]}"
-            story.append(Paragraph(cve_title, vuln_subsection_style))
-            
-            # Quick info line: Date, CVSS, EPSS
-            quick_info = f"<b>Published:</b> {row[3]} | <b>CVSS:</b> {row[4] if row[4] else 'N/A'} | <b>EPSS:</b> {row[5] if row[5] else 'N/A'}"
-            story.append(Paragraph(quick_info, vuln_label_style))
-            story.append(Spacer(1, 0.05*inch))
-            
-            # Description
-            story.append(Paragraph("<b>Description:</b>", vuln_label_style))
-            story.append(Paragraph(row[6], vuln_details_style))
+            if isinstance(row, dict):
+                vulnerabilities = row.get('vulnerabilities', [])
+                business_impact = row.get('business_impact', 'N/A')
+                remediation = row.get('remediation', 'N/A')
+                grouping_reason = row.get('grouping_reason', 'Grouping reason unavailable.')
+                group_title = row.get('group_title')
+            else:
+                vulnerabilities = [{
+                    'vendor_name': row[0],
+                    'product_name': row[1],
+                    'cve_id': row[2],
+                    'created_at': row[3],
+                    'cvss': row[4],
+                    'epss': row[5],
+                    'description': row[6],
+                }]
+                business_impact = row[7] if len(row) > 7 else 'N/A'
+                remediation = row[8] if len(row) > 8 else 'N/A'
+                grouping_reason = 'Grouping reason unavailable.'
+                group_title = None
+
+            products = list(dict.fromkeys(
+                ' '.join(part for part in (
+                    vulnerability.get('vendor_name', ''),
+                    vulnerability.get('product_name', ''),
+                ) if part).strip()
+                for vulnerability in vulnerabilities
+            ))
+            products = [product for product in products if product]
+            tool_title = '; '.join(products) or 'Affected product unavailable'
+            group_title = group_title or 'Related vulnerabilities'
+            story.append(Paragraph(escape(tool_title), group_title_style))
+            story.append(Paragraph(escape(str(group_title)), group_subtitle_style))
+            story.append(Paragraph(
+                f'<b>Grouping reason:</b> {escape(str(grouping_reason))}',
+                grouping_reason_style,
+            ))
+
+            table_data = [[
+                Paragraph('CVE code', table_header_style),
+                Paragraph('Published date', table_header_style),
+                Paragraph('CVSS', table_header_style),
+                Paragraph('EPSS', table_header_style),
+                Paragraph('Description', table_header_style),
+            ]]
+            for vulnerability in vulnerabilities:
+                table_data.append([
+                    Paragraph(escape(str(vulnerability.get('cve_id') or 'N/A')), table_cell_style),
+                    Paragraph(escape(str(vulnerability.get('created_at') or 'N/A')), table_cell_style),
+                    Paragraph(escape(str(vulnerability.get('cvss') if vulnerability.get('cvss') is not None else 'N/A')), table_cell_style),
+                    Paragraph(escape(str(vulnerability.get('epss') if vulnerability.get('epss') is not None else 'N/A')), table_cell_style),
+                    Paragraph(escape(str(vulnerability.get('description') or 'N/A')), table_cell_style),
+                ])
+
+            fixed_widths = [1.05*inch, 0.8*inch, 0.48*inch, 0.48*inch]
+            column_widths = fixed_widths + [doc.width - sum(fixed_widths)]
+            vulnerability_table = Table(
+                table_data,
+                colWidths=column_widths,
+                repeatRows=1,
+                hAlign='LEFT',
+            )
+            vulnerability_table.setStyle(TableStyle([
+                ('BACKGROUND', (0, 0), (-1, 0), BRAND_COLOR),
+                ('TEXTCOLOR', (0, 0), (-1, 0), HexColor('#FFFFFF')),
+                ('ROWBACKGROUNDS', (0, 1), (-1, -1), [HexColor('#FFFFFF'), LIGHT_GRAY]),
+                ('GRID', (0, 0), (-1, -1), 0.35, HexColor('#B8C2CC')),
+                ('VALIGN', (0, 0), (-1, -1), 'TOP'),
+                ('LEFTPADDING', (0, 0), (-1, -1), 5),
+                ('RIGHTPADDING', (0, 0), (-1, -1), 5),
+                ('TOPPADDING', (0, 0), (-1, -1), 5),
+                ('BOTTOMPADDING', (0, 0), (-1, -1), 5),
+            ]))
+            story.append(vulnerability_table)
             story.append(Spacer(1, 0.08*inch))
-            
-            # Business Impact and Remediation (if AI integration enabled)
+
             if ai_integration.lower() in ('1', 'true', 'yes'):
-                story.append(Paragraph("<b>Business Impact:</b>", vuln_label_style))
-                story.append(Paragraph(row[7], vuln_details_style))
+                story.append(Paragraph('Business Impact Analysis', chapter_style))
+                story.append(Paragraph(format_cited_text(business_impact, bibliography) or 'N/A', vuln_details_style))
                 story.append(Spacer(1, 0.08*inch))
-                
-                story.append(Paragraph("<b>Remediation:</b>", vuln_label_style))
-                story.append(Paragraph(row[8], vuln_details_style))
+                story.append(Paragraph('Remediation', chapter_style))
+                story.append(Paragraph(format_cited_text(remediation, bibliography) or 'N/A', vuln_details_style))
                 story.append(Spacer(1, 0.08*inch))
             
-            # Separator line between vulnerabilities (except for the last one)
-            if idx < len(rows):
+            # Separator line between groups.
+            if idx < len(rows) - 1:
                 sep_data = [['_' * 100]]
                 sep_table = Table(sep_data, colWidths=[7.5*inch])
                 sep_table.setStyle(TableStyle([
@@ -301,6 +463,25 @@ def write_pdf(filename, rows):
                 ]))
                 story.append(sep_table)
                 story.append(Spacer(1, 0.05*inch))
+
+        if bibliography:
+            story.append(Spacer(1, 0.2*inch))
+            story.append(Paragraph('Sitografia e bibliografia', heading_style))
+            bibliography_style = ParagraphStyle(
+                'BibliographyEntry',
+                parent=styles['Normal'],
+                fontSize=8,
+                leading=10,
+                wordWrap='CJK',
+                spaceAfter=4,
+            )
+            for url, number in bibliography.items():
+                host = urlsplit(url).netloc or url
+                story.append(Paragraph(
+                    f'<b>[{number}] {escape(host)}</b><br/>'
+                    f'<link href="{escape_attribute(url)}">{escape(url)}</link>',
+                    bibliography_style,
+                ))
     else:
         story.append(Paragraph('No vulnerabilities found in the specified period.', normal_style))
     
