@@ -502,10 +502,11 @@ def group_cves_copilot(candidates):
         for index, candidate in enumerate(candidates)
     ]
     prompt = (
-        'Analyze the following list of CVEs and group together vulnerabilities that are technically similar and, more importantly, have the same potential remediation.'
-        'Do not group vulnerabilities merely because they affect the same product or share a severity score. CVSS scores, descriptions, and CVE identifiers may differ. If similarity is uncertain, keep the vulnerabilities separate.'
-        'Return only a valid JSON object containing a "groups" array. Each group must include a unique "group_id", a concise "group_title", a short "grouping_reason", and a "record_ids" array containing the record_id values belonging to that group.'
-        'Every input record_id must appear exactly once. Do not invent, modify, or omit record_ids. The report will retain the original CVE identifiers and details. Do not include any text outside the JSON object.\n\nJSON:\n'
+        'Analizza il seguente elenco di CVE e raggruppa le vulnerabilità che sono tecnicamente simili e che, soprattutto, possono essere risolte attraverso la stessa strategia di remediation.'
+        'Non raggruppare le vulnerabilità esclusivamente perché interessano lo stesso prodotto o condividono lo stesso livello di gravità. I punteggi CVSS, le descrizioni e gli identificativi CVE possono essere differenti.'
+        'Restituisci esclusivamente una stringa interpretabile come oggetto JSON valido contenente un array denominato groups. Ogni gruppo deve includere un group_id univoco, un group_title conciso, un grouping_reason breve e un array record_ids contenente i valori record_id appartenenti a quel gruppo.'
+        'Ogni record_id presente nel input deve comparire esattamente una volta. Non inventare, modificare o omettere alcun record_id. Il report manterrà gli identificativi CVE originali e i relativi dettagli.'
+        'Non includere alcun testo al di fuori del JSON.'
         + json.dumps(records, ensure_ascii=False, separators=(',', ':'))
     )
     return parse_cve_groups(copilot_prompt_response(prompt), candidates)
